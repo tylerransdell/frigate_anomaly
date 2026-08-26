@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.so
+
+# Virtual environments (large, machine-specific)
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Machine-specific compiled OpenVINO IR (regenerated on first run)
+model_cache/
+
+# Machine-specific baseline captures from your camera
+baselines/
+
+# Runtime logs (may contain URLs / timestamps)
+logs/
+*.log
+
+# Debug / test artifacts (may contain your camera feed & IPs)
+front_test.jpg
+back_test.jpg
+test_proxy.py
+*.jpg
+
+# Local config contains your camera name & Frigate IP — never share
+config.json
+# (commit the sanitized template instead — config.example.json stays tracked)
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Misc
+scratch.*
+tmp/

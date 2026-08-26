@@ -1,0 +1,11 @@
+flask
+requests
+numpy
+torch
+torchvision
+transformers
+openvino
+nncf
+scikit-learn
+pillow
+paho-mqtt

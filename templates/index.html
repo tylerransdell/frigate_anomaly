@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frigate Anomaly Detector</title>
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#16213e">
+<style>
+  :root {
+    --bg: #1a1a2e; --card: #16213e; --accent: #0f3460;
+    --green: #00ff88; --red: #ff4757; --yellow: #ffa502;
+    --text: #e0e0e0; --muted: #8899aa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); padding: 16px;
+    max-width: 900px; margin: 0 auto; line-height: 1.5;
+  }
+  h1 { color: var(--green); margin-bottom: 8px; font-size: 1.4em; }
+  h2 { color: var(--yellow); margin: 24px 0 12px; font-size: 1.1em;
+       border-bottom: 1px solid var(--accent); padding-bottom: 6px; }
+  .card {
+    background: var(--card); border-radius: 12px; padding: 16px;
+    margin-bottom: 16px; border: 1px solid var(--accent);
+  }
+  label { display: block; color: var(--muted); font-size: 0.85em; margin-top: 12px; }
+  label:first-child { margin-top: 0; }
+
+  /* Inputs are full width, buttons are auto width */
+  input, select {
+    width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--accent);
+    background: var(--bg); color: var(--text); font-size: 0.95em; margin-top: 4px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--green); }
+
+  button {
+    padding: 10px 16px; border-radius: 8px; border: none;
+    background: var(--green); color: #000; font-weight: bold;
+    cursor: pointer; font-size: 0.95em; margin-top: 12px;
+    transition: opacity 0.2s, transform 0.1s; width: auto;
+  }
+  button:hover { opacity: 0.85; }
+  button:active { transform: scale(0.98); }
+  button.danger { background: var(--red); color: #fff; }
+  button.secondary { background: var(--accent); color: var(--text); }
+
+  .hint { color: var(--muted); font-size: 0.75em; font-style: italic; margin-top: 2px; display: block;}
+
+  .row { display: flex; gap: 12px; margin-top: 8px; }
+  .row > * { flex: 1; }
+
+  .status-badge {
+    display: inline-block; padding: 4px 12px; border-radius: 20px;
+    font-weight: bold; font-size: 0.85em;
+  }
+  .status-normal { background: #00ff8833; color: var(--green); }
+  .status-anomaly { background: #ff475733; color: var(--red); }
+  .status-unknown { background: #ffa50233; color: var(--yellow); }
+
+  .snippet-grid { display: flex; gap: 12px; overflow-x: auto; padding: 8px 0; }
+  .snippet {
+    min-width: 200px; background: var(--bg); border-radius: 8px;
+    padding: 8px; border: 2px solid var(--accent); text-align: center;
+  }
+  .snippet img { width: 100%; border-radius: 4px; }
+  .snippet .label { margin-top: 6px; font-size: 0.8em; }
+
+  /* Fixed Zone Container Layout */
+  .zone-container {
+    position: relative; width: 100%; min-height: 200px;
+    background: var(--bg); border-radius: 8px; overflow: hidden;
+    cursor: crosshair; display: flex; justify-content: center; align-items: center;
+    border: 1px solid var(--accent); margin-top: 8px;
+  }
+  .zone-container img {
+    max-width: 100%; height: auto; display: block;
+  }
+  .zone-box {
+    position: absolute; border: 2px dashed var(--green);
+    background: rgba(0,255,136,0.15); pointer-events: none;
+    box-sizing: border-box;
+  }
+
+  .knob-group { display: flex; gap: 8px; margin-top: 4px; }
+  .knob {
+    flex: 1; padding: 10px; text-align: center; border-radius: 8px;
+    border: 2px solid var(--accent); cursor: pointer; font-size: 0.9em;
+    transition: all 0.2s; background: var(--bg); color: var(--text);
+  }
+  .knob.active { border-color: var(--green); background: #00ff8822; color: var(--green); }
+  .knob:hover { border-color: var(--green); }
+
+  #engine-status { font-size: 0.9em; padding: 10px; border-radius: 8px; margin-bottom: 16px; text-align: center; font-weight: bold;}
+  .running { background: #00ff8822; color: var(--green); border: 1px solid var(--green); }
+  .stopped { background: #ff475722; color: var(--red); border: 1px solid var(--red); }
+
+  .experimental {
+    border: 1px dashed var(--yellow); opacity: 0.9;
+  }
+  .experimental::before {
+    content: "⚗️ EXPERIMENTAL"; display: block; color: var(--yellow);
+    font-size: 0.75em; font-weight: bold; margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>⚠ Frigate Anomaly Detector</h1>
+<p style="color:var(--muted);font-size:0.85em;">DINOv2-powered visual anomaly detection for Frigate NVR</p>
+
+<!-- ENGINE STATUS -->
+<div id="engine-status" class="stopped">● Engine Stopped</div>
+
+<!-- FRIGATE CONNECTION -->
+<h1>📷 Frigate Connection</h1>
+<div class="card">
+    <label>Frigate URL
+        <span class="hint">e.g., http://192.168.1.100:5000 (no trailing slash)</span>
+    </label>
+    <input type="text" id="frigate_url" value="http://192.168.1.100:5000"
+           placeholder="http://192.168.1.100:5000" style="width: 100%;">
+    
+    <button class="btn btn-secondary" onclick="loadCameras()" style="margin-top: 8px; width: 100%;">
+        🔍 Fetch Cameras
+    </button>
+
+    <label style="margin-top: 12px;">Camera Name
+        <span class="hint">Select a camera from the dropdown</span>
+    </label>
+    <select id="camera_name" style="width: 100%;">
+        <option value="">-- Select a camera --</option>
+    </select>
+
+    <div id="camera-status" class="hint" style="margin-top: 8px; color: #888;">
+        Click "Fetch Cameras" to load available cameras from Frigate
+    </div>
+    
+    <button onclick="saveConfig()" style="margin-top: 16px; width: 100%;">
+        💾 Save Settings
+    </button>
+    <div id="save-status" class="hint" style="margin-top: 8px; color: #888;">
+        Save your camera, detection zone, and all settings so they persist across restarts.
+    </div>
+</div>
+
+<!-- ZONE SELECTION -->
+<h2> Detection Zone</h2>
+<div class="card">
+  <p class="hint">Click and drag to position a pre-sized box. Its size = model resolution × crop scale (set below).</p>
+  <div id="zone-size-hint" class="hint" style="margin-top:6px; color: var(--yellow); font-style: normal; font-weight: bold;"></div>
+  
+  <button class="secondary" onclick="refreshSnapshot()" style="margin-bottom: 12px;">
+    📷 Load Camera Snapshot
+  </button>
+  
+  <div class="zone-container" id="zone-container" style="min-height: 200px; background: #0f1a2e; border-radius: 8px; overflow: hidden;">
+    <img id="zone-snapshot" src="" alt="Camera snapshot" style="max-width: 100%; height: auto; display: block;">
+    <div class="zone-box" id="zone-box" style="display:none"></div>
+  </div>
+  
+  <div class="row" style="margin-top:12px">
+    <div><label>X</label><input id="zone-x" type="number" value="0" readonly></div>
+    <div><label>Y</label><input id="zone-y" type="number" value="0" readonly></div>
+    <div><label>W</label><input id="zone-w" type="number" value="0" readonly></div>
+    <div><label>H</label><input id="zone-h" type="number" value="0" readonly></div>
+  </div>
+</div>
+
+<!-- MODEL SETTINGS -->
+<h2>🧠 Model Settings</h2>
+<div class="card">
+  <label>Model Area (input resolution)</label>
+  <div class="knob-group" id="model-size-knob">
+    <div class="knob active" data-val="half" onclick="setKnob('model-size-knob',this);updateZoneHint();">Half (224)</div>
+    <div class="knob" data-val="full" onclick="setKnob('model-size-knob',this);updateZoneHint();">Full (518)</div>
+  </div>
+
+  <label>Crop Scale
+    <span class="hint">Scales the zone crop before model input. 2.0 = zoom in, 0.5 = zoom out</span>
+  </label>
+  <div class="knob-group" id="scale-knob">
+    <div class="knob" data-val="0.5" onclick="setKnob('scale-knob',this);updateZoneHint();">0.5×</div>
+    <div class="knob active" data-val="1.0" onclick="setKnob('scale-knob',this);updateZoneHint();">1.0×</div>
+    <div class="knob" data-val="2.0" onclick="setKnob('scale-knob',this);updateZoneHint();">2.0×</div>
+  </div>
+
+  <label>Anomaly Threshold
+    <span class="hint">Cosine similarity cutoff. Lower = more sensitive. Start at 0.85</span>
+  </label>
+  <input id="threshold" type="number" step="0.01" min="0.5" max="0.99" value="0.85">
+</div>
+
+<!-- SAMPLING & DURATION -->
+<h2>⏱ Sampling & Duration</h2>
+<div class="card">
+  <label>Sampling Interval (seconds)
+    <span class="hint">How often to check, minimum 3s. Default 60s.</span>
+  </label>
+  <input id="sampling-interval" type="number" min="3" value="60">
+
+  <label>Duration Filter (seconds)
+    <span class="hint">0 = disabled. If >0, anomaly must persist this long. Sampling speeds up to fit the min-samples count in this window (3s fastest).</span>
+  </label>
+  <input id="duration-filter" type="number" min="0" value="0">
+
+  <label>Min Samples for Alert
+    <span class="hint">At least this many samples must be anomalous (0/null defaults to 1).</span>
+  </label>
+  <input id="min-samples" type="number" min="0" value="5">
+</div>
+
+<!-- MQTT ALERTS -->
+<h2>📡 MQTT Alerts</h2>
+<div class="card">
+  <label>MQTT Server
+    <span class="hint">e.g. 192.168.1.50 or mqtt.local</span>
+  </label>
+  <input id="mqtt-server" type="text" placeholder="192.168.1.50">
+
+  <label>MQTT Port
+    <span class="hint">Default 1883</span>
+  </label>
+  <input id="mqtt-port" type="number" value="1883">
+
+  <label>Alert Topic
+    <span class="hint">e.g. frigate/anomaly/alert</span>
+  </label>
+  <input id="mqtt-topic" type="text" placeholder="frigate/anomaly/alert">
+</div>
+
+<!-- BASELINE -->
+<h2>📸 Baseline</h2>
+<div class="card">
+  <p class="hint">Capture the current zone as your "normal" baseline. Make sure the scene is in its normal state.</p>
+  <div id="baseline-preview" style="margin:8px 0"></div>
+  <button onclick="captureBaseline()">Capture Baseline from Zone</button>
+</div>
+
+<!-- CONTROLS -->
+<h2>🚀 Engine Control</h2>
+<div class="card">
+  <div id="model-status" class="hint" style="margin-bottom: 8px; color: #8899aa;"></div>
+  <button onclick="startEngine()">Start Detection Engine</button>
+  <button class="danger" onclick="stopEngine()">Stop Engine</button>
+</div>
+
+<!-- LIVE DASHBOARD -->
+<h2>📊 Live Dashboard</h2>
+<div class="card">
+  <div class="snippet-grid" id="snippet-grid">
+    <div class="snippet"><p style="color:var(--muted)">No detections yet</p></div>
+  </div>
+</div>
+
+<script>
+// Register service worker
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js');
+}
+
+// State
+let config = {};
+let zoneDragging = false;
+
+// Knob helper
+function setKnob(groupId, el) {
+  document.querySelectorAll(`#${groupId} .knob`).forEach(k => k.classList.remove('active'));
+  el.classList.add('active');
+}
+function getKnob(groupId) {
+  const active = document.querySelector(`#${groupId} .knob.active`);
+  return active ? active.dataset.val : null;
+}
+
+// Load cameras from Frigate
+async function loadCameras() {
+    const frigateUrl = document.getElementById('frigate_url').value;
+    const statusEl = document.getElementById('camera-status');
+    const select = document.getElementById('camera_name');
+    
+    statusEl.textContent = 'Loading cameras...';
+    statusEl.style.color = '#4fc3f7';
+    
+    try {
+        // MUST match the Python @app.route("/api/cameras")
+        const resp = await fetch(`/api/cameras?frigate_url=${encodeURIComponent(frigateUrl)}`);
+        const data = await resp.json();
+        
+        if (data.error) {
+            statusEl.textContent = `Error: ${data.error}`;
+            statusEl.style.color = '#ef5350';
+            return;
+        }
+        
+        // Rebuild the dropdown with the fetched cameras
+        select.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '-- Select a camera --';
+        select.appendChild(placeholder);
+        data.cameras.forEach(cam => {
+            const option = document.createElement('option');
+            option.value = cam;
+            option.textContent = cam;
+            select.appendChild(option);
+        });
+        
+        statusEl.textContent = `✓ Found ${data.cameras.length} cameras`;
+        statusEl.style.color = '#4caf50';
+        
+        // Auto-select the first camera if nothing is chosen yet
+        if (data.cameras.length > 0 && !select.value) {
+            select.value = data.cameras[0];
+        }
+    } catch (e) {
+        statusEl.textContent = `Error: ${e.message}`;
+        statusEl.style.color = '#ef5350';
+    }
+}
+
+
+// Refresh snapshot for zone drawing
+async function refreshSnapshot() {
+  console.log("📸 refreshSnapshot triggered");
+  
+  const url = document.getElementById('frigate_url').value.trim();
+  const cam = document.getElementById('camera_name').value.trim();
+  
+  console.log("URL:", url, "Camera:", cam);
+  
+  if (!url || !cam) {
+    alert('Set Frigate URL and camera first');
+    return;
+  }
+  
+  const container = document.getElementById('zone-container');
+  
+  // Build the proxy URL
+  const proxyUrl = `/api/snapshot?frigate_url=${encodeURIComponent(url)}&camera_name=${encodeURIComponent(cam)}&t=${Date.now()}`;
+  console.log("Setting image src to:", proxyUrl);
+  
+  // Create a NEW image element
+  const img = new Image();
+  
+  // Set up handlers BEFORE setting src
+  img.onload = () => {
+    console.log("✅ Image loaded:", img.naturalWidth, "x", img.naturalHeight);
+    
+    // Clear container and add the loaded image
+    container.innerHTML = '';
+    img.style.maxWidth = '100%';
+    img.style.height = 'auto';
+    img.style.display = 'block';
+    img.style.borderRadius = '8px';
+    img.id = 'zone-snapshot';
+    
+    container.appendChild(img);
+    
+    // Re-add the zone box div
+    const zoneBox = document.createElement('div');
+    zoneBox.id = 'zone-box';
+    zoneBox.className = 'zone-box';
+    zoneBox.style.display = 'none';
+    container.appendChild(zoneBox);
+    
+    console.log("Container size:", container.offsetWidth, "x", container.offsetHeight);
+  };
+  
+  img.onerror = (e) => {
+    console.error("💥 Image failed to load:", e);
+    container.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--red);">Failed to load image. Check console.</div>';
+  };
+  
+  // Show loading state
+  container.style.minHeight = '200px';
+  container.innerHTML = '<div style="padding: 80px; text-align: center; color: var(--muted);">Loading snapshot...</div>';
+  
+  // Now set the src to trigger the load
+  img.src = proxyUrl;
+}
+
+// Zone selection: drag a pre-sized box to place the detection zone.
+// Box size = model input resolution (224 or 518) × crop scale (0.5 / 1.0 / 2.0).
+// We query the live DOM every time (the snapshot reload rebuilds these nodes),
+// so we never hold stale references.
+const zoneContainer = document.getElementById('zone-container');
+
+function currentImg() { return zoneContainer.querySelector('#zone-snapshot'); }
+function currentBox() { return zoneContainer.querySelector('#zone-box'); }
+
+function getModelRes() {
+  return getKnob('model-size-knob') === 'full' ? 518 : 224;
+}
+function getScaleVal() {
+  return parseFloat(getKnob('scale-knob')) || 1.0;
+}
+function getBoxSourceSize() {
+  return Math.round(getModelRes() * getScaleVal());
+}
+
+function updateZoneHint() {
+  const hint = document.getElementById('zone-size-hint');
+  if (hint) {
+    hint.textContent = `Box size on image: ${getModelRes()}px (${getKnob('model-size-knob')}) × ${getScaleVal()}× = ${getBoxSourceSize()}px`;
+  }
+}
+updateZoneHint();
+
+// Convert from on-screen display pixels to original image pixels.
+function displayPxToSource(px, img) {
+  const rect = img.getBoundingClientRect();
+  const scaleX = img.naturalWidth / rect.width;
+  const scaleY = img.naturalHeight / rect.height;
+  return {
+    x: Math.round(px.left * scaleX),
+    y: Math.round(px.top * scaleY),
+    w: Math.round(px.width * scaleX),
+    h: Math.round(px.height * scaleY),
+  };
+}
+
+zoneContainer.addEventListener('mousedown', e => {
+  const img = currentImg();
+  const box = currentBox();
+  if (!img || !img.naturalWidth || !box) return;
+
+  const rect = img.getBoundingClientRect();
+  const srcSize = getBoxSourceSize();
+  // Convert source box size into display pixels for the current image size.
+  const displayW = srcSize * (rect.width / img.naturalWidth);
+  const displayH = srcSize * (rect.height / img.naturalHeight);
+
+  // Place the box so its top-left follows the cursor, clamped inside the image.
+  let left = e.clientX - rect.left;
+  let top  = e.clientY - rect.top;
+  left = Math.max(0, Math.min(left, rect.width  - displayW));
+  top  = Math.max(0, Math.min(top,  rect.height - displayH));
+
+  box.style.display = 'block';
+  box.style.width  = displayW + 'px';
+  box.style.height = displayH + 'px';
+  box.style.left   = left + 'px';
+  box.style.top    = top + 'px';
+  updateZoneHint();
+  zoneDragging = true;
+});
+
+zoneContainer.addEventListener('mousemove', e => {
+  if (!zoneDragging) return;
+  const img = currentImg();
+  const box = currentBox();
+  if (!img || !box) return;
+
+  const rect = img.getBoundingClientRect();
+  const displayW = parseFloat(box.style.width);
+  const displayH = parseFloat(box.style.height);
+  let left = e.clientX - rect.left;
+  let top  = e.clientY - rect.top;
+  left = Math.max(0, Math.min(left, rect.width  - displayW));
+  top  = Math.max(0, Math.min(top,  rect.height - displayH));
+  box.style.left = left + 'px';
+  box.style.top  = top + 'px';
+});
+
+zoneContainer.addEventListener('mouseup', e => {
+  if (!zoneDragging) return;
+  zoneDragging = false;
+  const img = currentImg();
+  const box = currentBox();
+  if (!img || !box) return;
+
+  const src = displayPxToSource({
+    left: parseFloat(box.style.left),
+    top: parseFloat(box.style.top),
+    width: parseFloat(box.style.width),
+    height: parseFloat(box.style.height),
+  }, img);
+
+  // Clamp to the image bounds and write the source-pixel zone.
+  const maxX = Math.max(0, img.naturalWidth  - src.w);
+  const maxY = Math.max(0, img.naturalHeight - src.h);
+  document.getElementById('zone-x').value = Math.max(0, Math.min(src.x, maxX));
+  document.getElementById('zone-y').value = Math.max(0, Math.min(src.y, maxY));
+  document.getElementById('zone-w').value = src.w;
+  document.getElementById('zone-h').value = src.h;
+  updateZoneHint();
+});
+
+// Save config
+async function saveConfig() {
+  const saveStatus = document.getElementById('save-status');
+  config = {
+    frigate_url: document.getElementById('frigate_url').value,
+    camera: document.getElementById('camera_name').value,
+    zone: {
+      x: parseInt(document.getElementById('zone-x').value),
+      y: parseInt(document.getElementById('zone-y').value),
+      w: parseInt(document.getElementById('zone-w').value),
+      h: parseInt(document.getElementById('zone-h').value),
+    },
+    model_size: getKnob('model-size-knob'),
+    scale: parseFloat(getKnob('scale-knob')),
+    threshold: parseFloat(document.getElementById('threshold').value),
+    sampling_interval: parseInt(document.getElementById('sampling-interval').value),
+    duration_filter: parseInt(document.getElementById('duration-filter').value),
+    min_samples: parseInt(document.getElementById('min-samples').value),
+    mqtt_server: document.getElementById('mqtt-server').value,
+    mqtt_port: parseInt(document.getElementById('mqtt-port').value),
+    mqtt_topic: document.getElementById('mqtt-topic').value,
+  };
+
+  if (saveStatus) {
+    saveStatus.textContent = 'Saving...';
+    saveStatus.style.color = '#4fc3f7';
+  }
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(config)
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (saveStatus) {
+        const savedAt = new Date().toLocaleTimeString();
+        saveStatus.textContent = `✓ Saved at ${savedAt} — camera "${config.camera || '(none)'}" and zone (${config.zone.x}, ${config.zone.y}, ${config.zone.w}x${config.zone.h}) persisted.`;
+        saveStatus.style.color = '#4caf50';
+      }
+    } else {
+      if (saveStatus) {
+        saveStatus.textContent = `✗ Save failed: ${data.error || ('HTTP ' + res.status)}`;
+        saveStatus.style.color = '#ef5350';
+      }
+    }
+    return data;
+  } catch (e) {
+    if (saveStatus) {
+      saveStatus.textContent = `✗ Save failed: ${e.message}`;
+      saveStatus.style.color = '#ef5350';
+    }
+    return { error: e.message };
+  }
+}
+
+// Capture baseline
+async function captureBaseline() {
+  await saveConfig();
+  const res = await fetch('/api/baseline/capture', { method: 'POST' });
+  const data = await res.json();
+  if (data.status === 'ok') {
+    document.getElementById('baseline-preview').innerHTML =
+      `<img src="/api/baseline/image?t=${Date.now()}" style="max-width:300px;border-radius:8px">`;
+    alert('Baseline captured!');
+  } else {
+    alert('Error: ' + data.error);
+  }
+}
+
+// Engine control
+async function startEngine() {
+  await saveConfig();
+  const res = await fetch('/api/engine/start', { method: 'POST' });
+  const data = await res.json();
+  updateEngineStatus(data.running);
+  updateModelStatus(data);
+}
+async function stopEngine() {
+  const res = await fetch('/api/engine/stop', { method: 'POST' });
+  const data = await res.json();
+  updateEngineStatus(data.running);
+}
+function updateEngineStatus(running) {
+  const el = document.getElementById('engine-status');
+  el.className = running ? 'running' : 'stopped';
+  el.textContent = running ? '● Engine Running' : '● Engine Stopped';
+}
+
+function updateModelStatus(data) {
+  const el = document.getElementById('model-status');
+  if (!el) return;
+  if (data.model_error) {
+    el.textContent = '⚠ ' + data.model_error;
+    el.style.color = '#ef5350';
+  } else if (data.model_loading) {
+    el.textContent = '⏳ Model loading in background... (first run downloads + converts, may take a while)';
+    el.style.color = '#ffa502';
+  } else if (data.model_ready) {
+    el.textContent = '✓ Model ready';
+    el.style.color = '#4caf50';
+  } else {
+    el.textContent = 'Model not loaded. Start the engine to load it.';
+    el.style.color = '#8899aa';
+  }
+}
+
+// Poll dashboard
+async function pollDashboard() {
+  try {
+    const res = await fetch('/api/dashboard');
+    const data = await res.json();
+    updateEngineStatus(data.engine_running);
+    updateModelStatus(data);
+    const grid = document.getElementById('snippet-grid');
+    if (data.snippets.length === 0) {
+      grid.innerHTML = '<div class="snippet"><p style="color:var(--muted)">No detections yet</p></div>';
+      return;
+    }
+    grid.innerHTML = data.snippets.map(s => {
+      const statusClass = s.is_anomaly ? 'status-anomaly' : 'status-normal';
+      const statusText = s.is_anomaly ? 'ANOMALY' : 'NORMAL';
+      return `<div class="snippet">
+        <img src="${s.image_url}" alt="snippet">
+        <div class="label">
+          <span class="status-badge ${statusClass}">${statusText}</span>
+        </div>
+        <div style="font-size:0.7em;color:var(--muted)">sim: ${s.similarity.toFixed(3)}<br>${s.timestamp}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+setInterval(pollDashboard, 3000);
+pollDashboard();
+
+// Load saved config on startup
+(async () => {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    if (data.frigate_url) {
+      document.getElementById('frigate_url').value = data.frigate_url;
+      // Ensure the saved camera appears as a selectable option
+      const camSelect = document.getElementById('camera_name');
+      if (data.camera) {
+        const exists = Array.from(camSelect.options).some(o => o.value === data.camera);
+        if (!exists) {
+          const opt = document.createElement('option');
+          opt.value = data.camera;
+          opt.textContent = data.camera;
+          camSelect.appendChild(opt);
+        }
+        camSelect.value = data.camera;
+      }
+      document.getElementById('threshold').value = data.threshold || 0.85;
+      document.getElementById('sampling-interval').value = data.sampling_interval || 60;
+      document.getElementById('duration-filter').value = data.duration_filter || 0;
+      document.getElementById('min-samples').value = data.min_samples || 5;
+      document.getElementById('mqtt-server').value = data.mqtt_server || '';
+      document.getElementById('mqtt-port').value = data.mqtt_port || 1883;
+      document.getElementById('mqtt-topic').value = data.mqtt_topic || '';
+      if (data.zone) {
+        document.getElementById('zone-x').value = data.zone.x;
+        document.getElementById('zone-y').value = data.zone.y;
+        document.getElementById('zone-w').value = data.zone.w;
+        document.getElementById('zone-h').value = data.zone.h;
+      }
+      updateEngineStatus(data.engine_running);
+      updateModelStatus(data);
+    }
+  } catch(e) {}
+})();
+</script>
+</body>
+</html>
