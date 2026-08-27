@@ -615,12 +615,12 @@ async function loadBaselines() {
     grid.innerHTML = data.baselines.map(b => {
       const hasC = b.confidence !== null && b.confidence !== undefined;
       const conf = hasC ? Math.round(b.confidence) + '%' : '—';
-      // Duplicate tiers: >= 97% flat-out dup (red), 96% borderline dup (yellow).
+      // Duplicate tiers: >= 98% flat-out dup (red), 96-97% borderline dup (yellow).
       // Low similarity (<85%) is a suspect baseline (yellow "normal?"); below
       // 81% it's a strong outlier in red — suggest adding more normal examples.
       let status = null;
       if (hasC) {
-        if (b.confidence >= 97) status = { color: 'red', label: 'dup' };
+        if (b.confidence >= 98) status = { color: 'red', label: 'dup' };
         else if (b.confidence >= 96) status = { color: 'yellow', label: 'dup?' };
         else if (b.confidence < 81) status = { color: 'red', label: 'normal?' };
         else if (b.confidence < 85) status = { color: 'yellow', label: 'normal?' };

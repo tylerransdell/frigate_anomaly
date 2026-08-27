@@ -62,7 +62,7 @@ That's it. On the first run it converts and compiles the model (OpenVINO), which
 
 ## 🐎 Throughput
 
-About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) model**. That's fast enough to sample every couple of seconds without breaking a sweat. The console shows inference and fetch times.
+About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) model** — dropping to roughly **15ms** on the **small (112) model**. That's fast enough to sample every couple of seconds without breaking a sweat. The console shows inference and fetch times.
 
 ---
 
