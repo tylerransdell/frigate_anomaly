@@ -4,7 +4,7 @@
 
 A dumb little tool that runs **zero shot anomaly detection** on a Frigate camera feed. It grabs a picture from your camera, compares it to a "normal" baseline that you set, and lets you know (via logs, and optionally MQTT) when something looks weird.
 
-This is the proof of concept version.
+This is the proof of concept version. This will likely be only minimally maintained as proof that zero shot anomaly detection is extremely easy.
 
 ---
 
