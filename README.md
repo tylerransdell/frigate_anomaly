@@ -8,6 +8,14 @@ This is the proof of concept version.
 
 ---
 
+## ? WHY
+
+When you already have data, there are better options. Zero‑shot is what you use when data is limited or non‑existent.
+
+One educated guess for confidence and you suddenly have a smart detector. No training, no labeling, no dataset prep. Just define “normal” once and let the model handle everything else.
+
+---
+
 ## What it does / doesn't
 
 ✅ **Does:**
@@ -69,8 +77,6 @@ About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) mod
 8. Review the **Sampling & Duration** filters, and flip them on if you want.
 9. Hit **Start Engine** and let it do its thing.
 10. There are also MQTT alerts. Let me know if they work or I'll get around to it. 
-
-> Pro tip: feed it a camera with actual activity. Otherwise you're just watching a parking-lot simulator.
 
 ---
 
