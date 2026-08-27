@@ -61,7 +61,7 @@ That's it. On the first run it converts and compiles the model (OpenVINO), which
 
 ## 🐎 Throughput
 
-About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) model**. That's fast enough to sample every couple of seconds without breaking a sweat console shows inference and fetch times.
+About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) model**. That's fast enough to sample every couple of seconds without breaking a sweat. The console shows inference and fetch times.
 
 ---
 
@@ -77,6 +77,21 @@ About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) mod
 8. Review the **Sampling & Duration** filters, and flip them on if you want.
 9. Hit **Start Engine** and let it do its thing.
 10. There are also MQTT alerts. Let me know if they work or I'll get around to it. 
+
+---
+
+## ♻️ Persistence & Startup
+
+This is a standalone script, not a daemon yet. To keep it running across reboots, wrap `server.py` in a **system service** (e.g. a systemd unit) for now. A containerized (Docker) build may show up at some point, but it's **not** here today.
+
+The inference engine will fire up automatically on startup, but only once everything it needs has been saved. Your prerequisites are:
+
+- **Server** (Frigate URL)
+- **Camera**
+- **Detect area**
+- **Baseline image**
+
+Once all four are configured and saved, the engine starts on launch and does its thing.
 
 ---
 
