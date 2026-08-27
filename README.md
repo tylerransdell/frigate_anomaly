@@ -2,7 +2,7 @@
 
 **version 0.0 — proof of concept.** Don't get attached.
 
-A dumb little tool that runs **anomaly detection** on a [Frigate](https://frigate.nvr) camera feed. It grabs a picture from your camera, compares it to a "normal" baseline that you set, and lets you know (via logs, and optionally MQTT) when something looks weird.
+A dumb little tool that runs **zero shot anomaly detection** on a Frigate camera feed. It grabs a picture from your camera, compares it to a "normal" baseline that you set, and lets you know (via logs, and optionally MQTT) when something looks weird.
 
 This is the proof of concept version.
 
