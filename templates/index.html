@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Frigate Anomaly Detector</title>
+<title>Anomaly Detector for Frigate</title>
 <link rel="manifest" href="/static/manifest.json">
 <meta name="theme-color" content="#16213e">
 <style>
@@ -66,6 +66,29 @@
   }
   .snippet img { width: 100%; border-radius: 4px; }
   .snippet .label { margin-top: 6px; font-size: 0.8em; }
+  .snippet .sn-add {
+    width: 100%; margin-top: 6px; padding: 4px; font-size: 0.7em;
+    background: var(--accent); color: var(--text); border: none; border-radius: 6px;
+    cursor: pointer;
+  }
+  .snippet .sn-add:hover { background: var(--green); color: #000; }
+
+  .baseline-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 12px; padding: 8px 0;
+  }
+  .baseline-item {
+    background: var(--bg); border-radius: 8px; padding: 6px;
+    border: 2px solid var(--accent); text-align: center; position: relative;
+  }
+  .baseline-item img { width: 100%; border-radius: 4px; display: block; }
+  .baseline-item .b-label {
+    font-size: 0.75em; margin: 6px 0; color: var(--muted);
+  }
+  .baseline-item .b-label b { color: var(--text); }
+  .baseline-item .b-remove {
+    width: 100%; margin-top: 0; padding: 4px; font-size: 0.7em;
+  }
 
   /* Fixed Zone Container Layout */
   .zone-container {
@@ -107,7 +130,7 @@
 </head>
 <body>
 
-<h1>⚠ Frigate Anomaly Detector</h1>
+<h1>⚠ Anomaly Detection for Frigate</h1>
 <p style="color:var(--muted);font-size:0.85em;">DINOv2-powered visual anomaly detection for Frigate NVR</p>
 
 <!-- ENGINE STATUS -->
@@ -175,6 +198,7 @@
   <div class="knob-group" id="model-size-knob">
     <div class="knob active" data-val="half" onclick="setKnob('model-size-knob',this);updateZoneHint();">Half (224)</div>
     <div class="knob" data-val="full" onclick="setKnob('model-size-knob',this);updateZoneHint();">Full (518)</div>
+    <div class="knob" data-val="small" onclick="setKnob('model-size-knob',this);updateZoneHint();">Small (112)</div>
   </div>
 
   <label>Crop Scale
@@ -184,6 +208,14 @@
     <div class="knob" data-val="0.5" onclick="setKnob('scale-knob',this);updateZoneHint();">0.5×</div>
     <div class="knob active" data-val="1.0" onclick="setKnob('scale-knob',this);updateZoneHint();">1.0×</div>
     <div class="knob" data-val="2.0" onclick="setKnob('scale-knob',this);updateZoneHint();">2.0×</div>
+  </div>
+
+  <label>Similarity Method
+    <span class="hint">Nearest 1 = compare to the closest baseline. Mean of top 3 = compare to the average of the 3 closest (needs ≥3 baselines to differ).</span>
+  </label>
+  <div class="knob-group" id="similarity-knob">
+    <div class="knob" data-val="nearest" onclick="setKnob('similarity-knob',this);updateZoneHint();">Nearest 1</div>
+    <div class="knob active" data-val="mean_top3" onclick="setKnob('similarity-knob',this);updateZoneHint();">Mean of top 3</div>
   </div>
 
   <label>Anomaly Threshold
@@ -230,12 +262,18 @@
   <input id="mqtt-topic" type="text" placeholder="frigate/anomaly/alert">
 </div>
 
-<!-- BASELINE -->
-<h2>📸 Baseline</h2>
+<!-- BASELINE LIBRARY -->
+<h2>📚 Baseline Library</h2>
 <div class="card">
-  <p class="hint">Capture the current zone as your "normal" baseline. Make sure the scene is in its normal state.</p>
-  <div id="baseline-preview" style="margin:8px 0"></div>
-  <button onclick="captureBaseline()">Capture Baseline from Zone</button>
+  <p class="hint">Save up to 40 normal snapshots here. Each photo's confidence = similarity to its nearest neighbor — too close means it's a duplicate baseline candidate. Remove any candidate with the button on its card.</p>
+  <div class="row" style="align-items:center;">
+    <button onclick="captureBaseline()">📷 Capture Zone as Baseline</button>
+    <button class="secondary" onclick="loadBaselines()">↻ Refresh</button>
+  </div>
+  <div class="hint" id="baseline-count" style="margin-top:6px;color:var(--yellow);"></div>
+  <div class="baseline-grid" id="baseline-grid">
+    <p class="hint">Loading baselines...</p>
+  </div>
 </div>
 
 <!-- CONTROLS -->
@@ -391,7 +429,8 @@ function currentImg() { return zoneContainer.querySelector('#zone-snapshot'); }
 function currentBox() { return zoneContainer.querySelector('#zone-box'); }
 
 function getModelRes() {
-  return getKnob('model-size-knob') === 'full' ? 518 : 224;
+  const v = getKnob('model-size-knob');
+  return v === 'full' ? 518 : v === 'small' ? 112 : 224;
 }
 function getScaleVal() {
   return parseFloat(getKnob('scale-knob')) || 1.0;
@@ -502,6 +541,7 @@ async function saveConfig() {
     },
     model_size: getKnob('model-size-knob'),
     scale: parseFloat(getKnob('scale-knob')),
+    similarity_method: getKnob('similarity-knob'),
     threshold: parseFloat(document.getElementById('threshold').value),
     sampling_interval: parseInt(document.getElementById('sampling-interval').value),
     duration_filter: parseInt(document.getElementById('duration-filter').value),
@@ -550,13 +590,64 @@ async function captureBaseline() {
   const res = await fetch('/api/baseline/capture', { method: 'POST' });
   const data = await res.json();
   if (data.status === 'ok') {
-    document.getElementById('baseline-preview').innerHTML =
-      `<img src="/api/baseline/image?t=${Date.now()}" style="max-width:300px;border-radius:8px">`;
-    alert('Baseline captured!');
+    loadBaselines();
+    alert('Baseline captured! ' + data.count + ' saved.');
+  } else if (res.status === 409) {
+    alert('Baseline bank full (40/40). Delete baseline images before adding more.');
   } else {
     alert('Error: ' + data.error);
   }
 }
+
+async function loadBaselines() {
+  const grid = document.getElementById('baseline-grid');
+  const countEl = document.getElementById('baseline-count');
+  if (!grid) return;
+  try {
+    const res = await fetch('/api/baseline/list');
+    const data = await res.json();
+    countEl.textContent =
+      `${data.count}/${data.max} baselines — confidence = similarity to nearest neighbor (too close = duplicate candidate)`;
+    if (!data.baselines.length) {
+      grid.innerHTML = '<p class="hint">No baselines yet. Capture the zone or add from a live detection.</p>';
+      return;
+    }
+    grid.innerHTML = data.baselines.map(b => {
+      const hasC = b.confidence !== null && b.confidence !== undefined;
+      const conf = hasC ? Math.round(b.confidence) + '%' : '—';
+      // Duplicate tiers: >= 97% flat-out dup (red), 96% borderline dup (yellow).
+      // Low similarity (<85%) is a suspect baseline (yellow "normal?"); below
+      // 81% it's a strong outlier in red — suggest adding more normal examples.
+      let status = null;
+      if (hasC) {
+        if (b.confidence >= 97) status = { color: 'red', label: 'dup' };
+        else if (b.confidence >= 96) status = { color: 'yellow', label: 'dup?' };
+        else if (b.confidence < 81) status = { color: 'red', label: 'normal?' };
+        else if (b.confidence < 85) status = { color: 'yellow', label: 'normal?' };
+      }
+      const statusColor = status ? `var(--${status.color})` : 'var(--green)';
+      const statusNote = (status && status.color === 'red' && status.label === 'normal?')
+        ? ' — add more normal examples'
+        : '';
+      return `<div class="baseline-item">
+        <img src="${b.image_url}?t=${Date.now()}" alt="baseline ${b.index}">
+        <div class="b-label">
+          <b>#${b.index}</b> · conf <span style="color:${statusColor}">${conf}</span>
+          ${status ? `<div style="font-size:0.7em;color:${statusColor};margin-top:2px">${status.label}${statusNote}</div>` : ''}
+        </div>
+        <button class="danger b-remove" data-index="${b.index}">🗑 Remove</button>
+      </div>`;
+    }).join('');
+    grid.querySelectorAll('.b-remove').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await fetch('/api/baseline/remove/' + btn.dataset.index, { method: 'POST' });
+        loadBaselines();
+      });
+    });
+  } catch(e) {}
+}
+setInterval(loadBaselines, 5000);
+loadBaselines();
 
 // Engine control
 async function startEngine() {
@@ -565,6 +656,11 @@ async function startEngine() {
   const data = await res.json();
   updateEngineStatus(data.running);
   updateModelStatus(data);
+  // Model is compiling/downloading in the background (or recompiling because a
+  // different size was selected) — poll until it comes up.
+  if (data.loading) {
+    setTimeout(startEngine, 3000);
+  }
 }
 async function stopEngine() {
   const res = await fetch('/api/engine/stop', { method: 'POST' });
@@ -616,8 +712,26 @@ async function pollDashboard() {
           <span class="status-badge ${statusClass}">${statusText}</span>
         </div>
         <div style="font-size:0.7em;color:var(--muted)">sim: ${s.similarity.toFixed(3)}<br>${s.timestamp}</div>
+        <button class="sn-add" data-url="${s.image_url}">+ Use as baseline</button>
       </div>`;
     }).join('');
+    grid.querySelectorAll('.sn-add').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const resp = await fetch('/api/baseline/add', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ image_url: btn.dataset.url })
+        });
+        const d = await resp.json();
+        if (resp.status === 409) {
+          alert('Baseline bank full (40/40). Delete baseline images before adding more.');
+        } else if (d.status === 'ok') {
+          alert('Added to baseline library (' + d.count + ' saved).');
+          loadBaselines();
+        } else {
+          alert('Error: ' + (d.error || 'Failed to add baseline'));
+        }
+      });
+    });
   } catch(e) {}
 }
 setInterval(pollDashboard, 3000);
@@ -643,6 +757,24 @@ pollDashboard();
         camSelect.value = data.camera;
       }
       document.getElementById('threshold').value = data.threshold || 0.85;
+      if (data.model_size) {
+        const sizeTargets = {
+          'small': '[data-val="small"]',
+          'half': '[data-val="half"]',
+          'full': '[data-val="full"]',
+        };
+        const sizeEl = document.querySelector('#model-size-knob ' + (sizeTargets[data.model_size] || '[data-val="half"]'));
+        if (sizeEl) setKnob('model-size-knob', sizeEl);
+      }
+      if (data.scale) {
+        const scaleEl = document.querySelector(`#scale-knob [data-val="${data.scale}"]`);
+        if (scaleEl) setKnob('scale-knob', scaleEl);
+      }
+      if (data.similarity_method) {
+        const simEl = document.querySelector(`#similarity-knob [data-val="${data.similarity_method}"]`);
+        if (simEl) setKnob('similarity-knob', simEl);
+      }
+      updateZoneHint();
       document.getElementById('sampling-interval').value = data.sampling_interval || 60;
       document.getElementById('duration-filter').value = data.duration_filter || 0;
       document.getElementById('min-samples').value = data.min_samples || 5;

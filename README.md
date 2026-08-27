@@ -1,4 +1,4 @@
-# 🦖 frigate_anomaly
+# 🦖 Anomaly Detection for Frigate
 
 **version 0.0 — proof of concept.** Don't get attached.
 
@@ -20,11 +20,12 @@ One educated guess for confidence and you suddenly have a smart detector. No tra
 
 ✅ **Does:**
 - Pulls snapshots straight from the Frigate API (no auth, local use).
-- Lets you pick a camera, draw a zone, and capture a baseline.
+- Lets you pick a camera, draw a zone, and capture baselines.
+- Keeps a **baseline library of up to 40 images**, so your "normal" is more than one lucky snapshot.
 - Runs the DINOv2 vision model through **OpenVINO only** (iGPU/CPU — no CUDA drama).
 - Gives you basic filtering and interval sampling, speeding up whenever an anomaly is actually brewing.
 - Includes a tiny dashboard so you can see what it's flagging.
-- Runs as **one instance** — single camera, single baseline, zero swag.
+- Runs as **one instance** — single camera, zero swag.
 
 ❌ **Doesn't (yet):**
 - No multi-camera, no docker-compose, no auth, no Home Assistant integration.
@@ -65,6 +66,19 @@ About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) mod
 
 ---
 
+## 🎯 How It Decides (k-NN)
+
+This is textbook **k-nearest-neighbors** on the baseline library:
+
+1. Every captured baseline is turned into an embedding — a compact vector fingerprint of the scene.
+2. Every live snapshot becomes an embedding too, then gets scored against your whole **baseline library (up to 40 images)**.
+3. Pick the method: score against your **single nearest neighbor** (k=1) or the **mean of the top 3 nearest** (k=3 / "mean of top 3").
+4. That similarity hits your **Anomaly Threshold** — under it, it's an anomaly; at or above it, normal.
+
+The baseline dashboard previews each image's confidence (its own nearest-neighbor similarity), so you can spot duplicates or outliers in your "normal" set before they skew detection.
+
+---
+
 ## 🕹️ Using It
 
 1. Open the web UI (usually `http://host:8080`).
@@ -73,10 +87,13 @@ About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) mod
 4. Click **Load Camera Snapshot** so you can actually see what the camera sees.
 5. Tweak **Model Area** (Half 224 / Full 518) and **Crop** (0.5× / 1.0× / 2.0×) to your taste.
 6. **Click-drag** a box on the image to select the zone you care about.
-7. Click **Capture Baseline** — that's your "everything is normal" picture.
-8. Review the **Sampling & Duration** filters, and flip them on if you want.
-9. Hit **Start Engine** and let it do its thing.
-10. There are also MQTT alerts. Let me know if they work or I'll get around to it. 
+7. Click **Capture Baseline** — that's your "everything is normal" picture. Keep adding snapshots to the **Baseline Library** (up to 40) to cover more normal variety; you can pull them straight from the live dashboard too.
+8. Pick a **Similarity Method** — **Nearest 1** scores against your single closest baseline, or **Mean of top 3** scores against the average of your 3 closest (or however many you've saved). Same **Anomaly Threshold** line applies to whichever you choose.
+9. Review the **Sampling & Duration** filters, and flip them on if you want.
+10. Hit **Start Engine** and let it do its thing.
+11. There are also MQTT alerts. Let me know if they work or I'll get around to it. 
+
+> 💡 **Nearest vs. mean:** a perfect match to *one* baseline isn't necessarily a great match to the *mean* of the top few — if you only have 1–2 baselines, "mean of top 3" is really just the mean of those 1–2, so the two methods start agreeing. Gather ≥3 diverse baselines and the mean method really shines; with fewer, **Nearest 1** is often the more honest pick. 
 
 ---
 
@@ -89,7 +106,7 @@ The inference engine will fire up automatically on startup, but only once everyt
 - **Server** (Frigate URL)
 - **Camera**
 - **Detect area**
-- **Baseline image**
+- **At least one baseline image** (the library holds up to 40)
 
 Once all four are configured and saved, the engine starts on launch and does its thing.
 
@@ -98,7 +115,7 @@ Once all four are configured and saved, the engine starts on launch and does its
 ## ✋ Fine Print & Caveats
 
 - `server.py` compiles the OpenVINO IR once and caches it under `model_cache/`. If you delete that folder, it'll rebuild itself.
-- Your settings live in `config.json` (git-ignored), and your baseline lives in `baselines/` (also git-ignored). Both are just plain files on disk.
+- Your settings live in `config.json` (git-ignored), and your baselines live in `baselines/` (also git-ignored). Both are just plain files on disk. Up to 40 baseline images, compared as the mean of the 3 nearest — they persist across restarts.
 - **Honest warning:** there's no auth, no HTTPS, nothing. Run it on a trusted LAN and don't port-forward it.
 
 ---
