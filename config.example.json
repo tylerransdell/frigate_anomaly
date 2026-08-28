@@ -1,21 +1,28 @@
 {
   "frigate_url": "http://192.168.1.100:5000",
-  "camera": "",
+  "camera": "back",
   "zone": {
-    "x": 0,
-    "y": 0,
+    "x": 800,
+    "y": 400,
     "w": 224,
     "h": 224
   },
+  "zone_units": "pixels",
   "model_size": "half",
   "scale": 1,
-  "threshold": 0.9,
+  "threshold": 0.89,
   "similarity_method": "mean_top3",
   "neighbors": 3,
   "sampling_interval": 60,
   "duration_filter": 0,
   "min_samples": 3,
+  "max_anomalies": 64,
+  "anomaly_dedupe_threshold": 0.87,
   "mqtt_server": "",
   "mqtt_port": 1883,
-  "mqtt_topic": "frigate/anomaly/alert"
+  "mqtt_topic": "frigate/anomaly/alert",
+  "zone_ref": {
+    "w": 1280,
+    "h": 720
+  }
 }

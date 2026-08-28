@@ -21,6 +21,10 @@ model_cache/
 # Machine-specific baseline captures from your camera
 baselines/
 
+# Persisted anomaly captures + saved profiles (may contain your camera feed)
+anomalies/
+profiles/
+
 # Runtime logs (may contain URLs / timestamps)
 logs/
 *.log
@@ -29,6 +33,7 @@ logs/
 front_test.jpg
 back_test.jpg
 test_proxy.py
+test_bulk_sampling.py
 *.jpg
 *.test
 notes*

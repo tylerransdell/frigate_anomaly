@@ -74,8 +74,11 @@
   .snippet .sn-add:hover { background: var(--green); color: #000; }
 
   .baseline-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     gap: 12px; padding: 8px 0;
+    /* Always show at least 3 rows before any scrolling on the page. */
+    min-height: 700px;
+    align-content: start;
   }
   .baseline-item {
     background: var(--bg); border-radius: 8px; padding: 6px;
@@ -89,6 +92,24 @@
   .baseline-item .b-remove {
     width: 100%; margin-top: 0; padding: 4px; font-size: 0.7em;
   }
+
+  .anomaly-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 12px; padding: 8px 0;
+  }
+  .anomaly-item {
+    background: var(--bg); border-radius: 8px; padding: 6px;
+    border: 2px solid var(--red); text-align: center;
+  }
+  .anomaly-item img { width: 100%; border-radius: 4px; display: block; }
+  .anomaly-item .a-label { font-size: 0.75em; margin: 6px 0; color: var(--muted); }
+  .anomaly-item .a-btn {
+    width: 100%; margin-top: 4px; padding: 4px; font-size: 0.7em;
+  }
+
+  .profile-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .profile-row input { flex: 2; margin-top: 0; }
+  .profile-row button { margin-top: 0; flex: 1; }
 
   /* Fixed Zone Container Layout */
   .zone-container {
@@ -196,18 +217,19 @@
 <div class="card">
   <label>Model Area (input resolution)</label>
   <div class="knob-group" id="model-size-knob">
-    <div class="knob active" data-val="half" onclick="setKnob('model-size-knob',this);updateZoneHint();">Half (224)</div>
-    <div class="knob" data-val="full" onclick="setKnob('model-size-knob',this);updateZoneHint();">Full (518)</div>
-    <div class="knob" data-val="small" onclick="setKnob('model-size-knob',this);updateZoneHint();">Small (112)</div>
+    <div class="knob active" data-val="half" onclick="setKnob('model-size-knob',this);updateZoneHint();scheduleSaveConfig();">Half (224)</div>
+    <div class="knob" data-val="small" onclick="setKnob('model-size-knob',this);updateZoneHint();scheduleSaveConfig();">Small (112)</div>
   </div>
 
   <label>Crop Scale
-    <span class="hint">Scales the zone crop before model input. 2.0 = zoom in, 0.5 = zoom out</span>
+    <span class="hint">Scales the zone crop before model input. 3.0 zooms out to cover a much bigger area (replaces the old Full model).</span>
   </label>
   <div class="knob-group" id="scale-knob">
-    <div class="knob" data-val="0.5" onclick="setKnob('scale-knob',this);updateZoneHint();">0.5×</div>
-    <div class="knob active" data-val="1.0" onclick="setKnob('scale-knob',this);updateZoneHint();">1.0×</div>
-    <div class="knob" data-val="2.0" onclick="setKnob('scale-knob',this);updateZoneHint();">2.0×</div>
+    <div class="knob" data-val="0.25" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">0.25×</div>
+    <div class="knob" data-val="0.5" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">0.5×</div>
+    <div class="knob active" data-val="1.0" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">1.0×</div>
+    <div class="knob" data-val="2.0" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">2.0×</div>
+    <div class="knob" data-val="3.0" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">3.0×</div>
   </div>
 
   <label>Similarity Method
@@ -219,9 +241,9 @@
   </div>
 
   <label>Anomaly Threshold
-    <span class="hint">Cosine similarity cutoff. Lower = more sensitive. Start at 0.85</span>
+    <span class="hint">Cosine similarity cutoff. Live frames scoring below this are flagged anomalous. Start around 0.89.</span>
   </label>
-  <input id="threshold" type="number" step="0.01" min="0.5" max="0.99" value="0.85">
+  <input id="threshold" type="number" step="0.01" min="0.5" max="0.99" value="0.89">
 </div>
 
 <!-- SAMPLING & DURATION -->
@@ -265,11 +287,16 @@
 <!-- BASELINE LIBRARY -->
 <h2>📚 Baseline Library</h2>
 <div class="card">
-  <p class="hint">Save up to 40 normal snapshots here. Each photo's confidence = similarity to its nearest neighbor — too close means it's a duplicate baseline candidate. Remove any candidate with the button on its card.</p>
+  <p class="hint">Save up to 64 normal snapshots here. Each photo's confidence = similarity to its nearest neighbor — too close means a duplicate. Add a one-touch 24-hour baseline set from recordings, then trim what you don't need.</p>
   <div class="row" style="align-items:center;">
     <button onclick="captureBaseline()">📷 Capture Zone as Baseline</button>
     <button class="secondary" onclick="loadBaselines()">↻ Refresh</button>
   </div>
+  <div class="row" style="align-items:center; margin-top:8px;">
+    <button class="secondary" onclick="bulkSample(60)">⏱ 24 samples (hourly)</button>
+    <button class="secondary" onclick="bulkSample(30)">⏱ 48 samples (30 min)</button>
+  </div>
+  <div class="hint" id="bulk-status" style="margin-top:6px;color:var(--yellow);"></div>
   <div class="hint" id="baseline-count" style="margin-top:6px;color:var(--yellow);"></div>
   <div class="baseline-grid" id="baseline-grid">
     <p class="hint">Loading baselines...</p>
@@ -287,9 +314,41 @@
 <!-- LIVE DASHBOARD -->
 <h2>📊 Live Dashboard</h2>
 <div class="card">
+  <div class="hint" id="lowest-score" style="color: var(--yellow); font-weight:bold; margin-bottom:8px;"></div>
   <div class="snippet-grid" id="snippet-grid">
     <div class="snippet"><p style="color:var(--muted)">No detections yet</p></div>
   </div>
+</div>
+
+<!-- ANOMALY DASHBOARD -->
+<h2>🚨 Saved Anomalies</h2>
+<div class="card">
+  <p class="hint">Recent anomalies persisted to disk (deduped). Promote one to a baseline or remove it.</p>
+  <div class="row" style="align-items:center;">
+    <label style="flex:2; margin:0;">Dedupe threshold
+      <span class="hint">Skip saving a new anomaly if it's closer than this to a saved one.</span>
+    </label>
+    <input id="anomaly-dedupe" type="number" step="0.01" min="0" max="0.99" value="0.87" style="flex:1;">
+  </div>
+  <div class="anomaly-grid" id="anomaly-grid">
+    <p class="hint">No saved anomalies yet.</p>
+  </div>
+</div>
+
+<!-- PROFILES -->
+<h2>💾 Profiles</h2>
+<div class="card">
+  <p class="hint">Save the baseline library + settings and reload them later. Loading stops the engine, restores, and restarts. Up to 10 profiles. (Saved anomalies live outside profiles — they're a global store that loading a profile never touches.)</p>
+  <div class="profile-row">
+    <input id="profile-name" type="text" placeholder="profile name">
+    <button onclick="saveProfile()">💾 Save</button>
+    <button class="danger" id="profile-delete" onclick="deleteProfile()">🗑</button>
+  </div>
+  <div class="hint" id="profile-status" style="margin-top:6px;color:var(--yellow);"></div>
+  <select id="profile-select" style="margin-top:8px;">
+    <option value="">-- Select a profile to load --</option>
+  </select>
+  <button class="secondary" onclick="loadSelectedProfile()" style="width:100%;">Load Profile</button>
 </div>
 
 <script>
@@ -310,6 +369,14 @@ function setKnob(groupId, el) {
 function getKnob(groupId) {
   const active = document.querySelector(`#${groupId} .knob.active`);
   return active ? active.dataset.val : null;
+}
+
+// Debounce auto-save so knob selections persist without the user hunting for a
+// Save button. Used by model-size / crop-scale knob changes.
+let _persistTimer = null;
+function scheduleSaveConfig() {
+  clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => saveConfig(), 400);
 }
 
 // Load cameras from Frigate
@@ -430,7 +497,7 @@ function currentBox() { return zoneContainer.querySelector('#zone-box'); }
 
 function getModelRes() {
   const v = getKnob('model-size-knob');
-  return v === 'full' ? 518 : v === 'small' ? 112 : 224;
+  return v === 'small' ? 112 : 224;
 }
 function getScaleVal() {
   return parseFloat(getKnob('scale-knob')) || 1.0;
@@ -540,7 +607,7 @@ async function saveConfig() {
       h: parseInt(document.getElementById('zone-h').value),
     },
     model_size: getKnob('model-size-knob'),
-    scale: parseFloat(getKnob('scale-knob')),
+    scale: getKnob('scale-knob'),   // keep the raw string ("0.5"/"1.0"/"2.0"/"3.0") so it round-trips
     similarity_method: getKnob('similarity-knob'),
     threshold: parseFloat(document.getElementById('threshold').value),
     sampling_interval: parseInt(document.getElementById('sampling-interval').value),
@@ -549,6 +616,8 @@ async function saveConfig() {
     mqtt_server: document.getElementById('mqtt-server').value,
     mqtt_port: parseInt(document.getElementById('mqtt-port').value),
     mqtt_topic: document.getElementById('mqtt-topic').value,
+    max_anomalies: 64,
+    anomaly_dedupe_threshold: parseFloat(document.getElementById('anomaly-dedupe').value),
   };
 
   if (saveStatus) {
@@ -593,7 +662,7 @@ async function captureBaseline() {
     loadBaselines();
     alert('Baseline captured! ' + data.count + ' saved.');
   } else if (res.status === 409) {
-    alert('Baseline bank full (40/40). Delete baseline images before adding more.');
+    alert('Baseline bank full (64/64). Delete baseline images before adding more.');
   } else {
     alert('Error: ' + data.error);
   }
@@ -617,25 +686,24 @@ async function loadBaselines() {
       // Round once so the displayed % always matches the color tier below.
       const c = hasC ? Math.round(b.confidence) : null;
       const conf = hasC ? c + '%' : '—';
-      // Duplicate tiers: >= 98% flat-out dup (red), 96-97% borderline dup (yellow).
-      // Low similarity (<85%) is a suspect baseline (yellow "normal?"); below
-      // 81% it's a strong outlier in red — suggest adding more normal examples.
+      // Refactored color tiers:
+      //   100 red   "literally a dup"
+      //   98  yellow "near dup"
+      //   <85 yellow "need more neighbors"
+      //   <80 red   "wrong tool for the job?"
       let status = null;
       if (hasC) {
-        if (c >= 98) status = { color: 'red', label: 'dup' };
-        else if (c >= 96) status = { color: 'yellow', label: 'dup?' };
-        else if (c < 81) status = { color: 'red', label: 'normal?' };
-        else if (c < 85) status = { color: 'yellow', label: 'normal?' };
+        if (c >= 100) status = { color: 'red', label: 'literally a dup' };
+        else if (c >= 98) status = { color: 'yellow', label: 'near dup' };
+        else if (c < 80) status = { color: 'red', label: 'wrong tool for the job?' };
+        else if (c < 85) status = { color: 'yellow', label: 'need more neighbors' };
       }
       const statusColor = status ? `var(--${status.color})` : 'var(--green)';
-      const statusNote = (status && status.color === 'red' && status.label === 'normal?')
-        ? ' — add more normal examples'
-        : '';
       return `<div class="baseline-item">
         <img src="${b.image_url}?t=${Date.now()}" alt="baseline ${b.index}">
         <div class="b-label">
           <b>#${b.index}</b> · conf <span style="color:${statusColor}">${conf}</span>
-          ${status ? `<div style="font-size:0.7em;color:${statusColor};margin-top:2px">${status.label}${statusNote}</div>` : ''}
+          ${status ? `<div style="font-size:0.7em;color:${statusColor};margin-top:2px">${status.label}</div>` : ''}
         </div>
         <button class="danger b-remove" data-index="${b.index}">🗑 Remove</button>
       </div>`;
@@ -650,6 +718,143 @@ async function loadBaselines() {
 }
 setInterval(loadBaselines, 5000);
 loadBaselines();
+
+// One-touch 24h baseline set
+async function bulkSample(minutes) {
+  const statusEl = document.getElementById('bulk-status');
+  const label = minutes === 60 ? '24 (hourly)' : '48 (30 min)';
+  if (statusEl) {
+    statusEl.textContent = `⏳ Processing — sampling last 24h (${minutes === 60 ? 24 : 48} snapshots)... this may take up to 10–120 seconds.`;
+    statusEl.style.color = '#4fc3f7';
+  }
+  try {
+    const res = await fetch('/api/baseline/bulk', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ minutes })
+    });
+    const d = await res.json();
+    if (statusEl) {
+      if (d.ok) {
+        statusEl.textContent = '✓ ' + d.message;
+        statusEl.style.color = '#4caf50';
+      } else {
+        statusEl.textContent = '✗ ' + (d.error || 'Failed');
+        statusEl.style.color = '#ef5350';
+      }
+    }
+    if (d.ok) loadBaselines();
+  } catch(e) {
+    if (statusEl) { statusEl.textContent = '✗ ' + e.message; statusEl.style.color = '#ef5350'; }
+  }
+}
+
+// Saved anomalies dashboard
+async function loadAnomalies() {
+  const grid = document.getElementById('anomaly-grid');
+  if (!grid) return;
+  try {
+    const res = await fetch('/api/anomalies/list');
+    const data = await res.json();
+    if (!data.anomalies.length) {
+      grid.innerHTML = '<p class="hint">No saved anomalies yet.</p>';
+      return;
+    }
+    grid.innerHTML = data.anomalies.map(a => {
+      const conf = (a.confidence !== null && a.confidence !== undefined)
+        ? Math.round(a.confidence) + '%' : '—';
+      return `<div class="anomaly-item">
+        <img src="${a.image_url}?t=${Date.now()}" alt="anomaly ${a.index}">
+        <div class="a-label"><b>#${a.index}</b> · sim ${conf}</div>
+        <button class="secondary a-btn" data-index="${a.index}">+ Add as baseline</button>
+        <button class="danger a-btn" data-index="${a.index}">🗑 Remove</button>
+      </div>`;
+    }).join('');
+    grid.querySelectorAll('.a-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const idx = btn.dataset.index;
+        const isAdd = btn.textContent.includes('Add as baseline');
+        const url = isAdd ? `/api/anomalies/add-baseline/${idx}` : `/api/anomalies/remove/${idx}`;
+        const resp = await fetch(url, { method: 'POST' });
+        const d = await resp.json();
+        if (d.status === 'ok') {
+          loadAnomalies();
+          if (isAdd) loadBaselines();
+        } else {
+          alert(d.error || 'Action failed');
+        }
+      });
+    });
+  } catch(e) {}
+}
+setInterval(loadAnomalies, 5000);
+loadAnomalies();
+
+// Profiling
+function setProfileStatus(msg, color) {
+  const el = document.getElementById('profile-status');
+  if (el) { el.textContent = msg; el.style.color = color || 'var(--yellow)'; }
+}
+async function loadProfiles(selected) {
+  try {
+    const res = await fetch('/api/profiles');
+    const data = await res.json();
+    const sel = document.getElementById('profile-select');
+    sel.innerHTML = '<option value="">-- Select a profile to load --</option>';
+    data.profiles.forEach(n => {
+      const o = document.createElement('option');
+      o.value = n; o.textContent = n;
+      sel.appendChild(o);
+    });
+    if (selected) sel.value = selected;
+  } catch(e) {}
+}
+async function saveProfile() {
+  const name = document.getElementById('profile-name').value.trim();
+  if (!name) { setProfileStatus('Enter a profile name', '#ef5350'); return; }
+  await saveConfig();
+  const resp = await fetch('/api/profiles/save', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name })
+  });
+  const d = await resp.json();
+  if (d.status === 'ok') {
+    setProfileStatus(`Profile "${name}" saved.`, '#4caf50');
+    loadProfiles(name);
+  } else {
+    setProfileStatus(d.error || 'Save failed', '#ef5350');
+  }
+}
+async function loadSelectedProfile() {
+  const name = document.getElementById('profile-select').value;
+  if (!name) { setProfileStatus('Pick a profile first', '#ef5350'); return; }
+  setProfileStatus(`Loading "${name}" — engine will stop, restore, and restart...`, '#4fc3f7');
+  const resp = await fetch('/api/profiles/load', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name })
+  });
+  const d = await resp.json();
+  if (d.status !== 'ok') { setProfileStatus(d.error || 'Load failed', '#ef5350'); return; }
+  setProfileStatus(`Profile "${name}" loaded.`, '#4caf50');
+  loadBaselines();
+  loadAnomalies();
+  setTimeout(() => location.reload(), 1200);
+}
+async function deleteProfile() {
+  const name = document.getElementById('profile-select').value;
+  if (!name) { setProfileStatus('Pick a profile to delete', '#ef5350'); return; }
+  const resp = await fetch('/api/profiles/delete', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name })
+  });
+  const d = await resp.json();
+  if (d.status === 'ok') {
+    setProfileStatus('Profile deleted.', '#4caf50');
+    loadProfiles();
+  } else {
+    setProfileStatus(d.error || 'Delete failed', '#ef5350');
+  }
+}
+loadProfiles();
 
 // Engine control
 async function startEngine() {
@@ -700,6 +905,15 @@ async function pollDashboard() {
     const data = await res.json();
     updateEngineStatus(data.engine_running);
     updateModelStatus(data);
+    // Lowest observed score
+    const lowEl = document.getElementById('lowest-score');
+    if (lowEl) {
+      if (data.perf && data.perf.lowest_sim !== null && data.perf.lowest_sim !== undefined) {
+        lowEl.textContent = `📉 Lowest observed similarity: ${data.perf.lowest_sim.toFixed(4)} (of ${data.perf.detections} detections)`;
+      } else {
+        lowEl.textContent = '📉 Lowest observed similarity: — (resets on baseline/method changes)';
+      }
+    }
     const grid = document.getElementById('snippet-grid');
     if (data.snippets.length === 0) {
       grid.innerHTML = '<div class="snippet"><p style="color:var(--muted)">No detections yet</p></div>';
@@ -725,7 +939,7 @@ async function pollDashboard() {
         });
         const d = await resp.json();
         if (resp.status === 409) {
-          alert('Baseline bank full (40/40). Delete baseline images before adding more.');
+          alert('Baseline bank full (64/64). Delete baseline images before adding more.');
         } else if (d.status === 'ok') {
           alert('Added to baseline library (' + d.count + ' saved).');
           loadBaselines();
@@ -758,18 +972,25 @@ pollDashboard();
         }
         camSelect.value = data.camera;
       }
-      document.getElementById('threshold').value = data.threshold || 0.85;
+      document.getElementById('threshold').value = data.threshold || 0.89;
       if (data.model_size) {
         const sizeTargets = {
           'small': '[data-val="small"]',
           'half': '[data-val="half"]',
-          'full': '[data-val="full"]',
         };
         const sizeEl = document.querySelector('#model-size-knob ' + (sizeTargets[data.model_size] || '[data-val="half"]'));
         if (sizeEl) setKnob('model-size-knob', sizeEl);
       }
-      if (data.scale) {
-        const scaleEl = document.querySelector(`#scale-knob [data-val="${data.scale}"]`);
+      if (data.scale !== undefined && data.scale !== null && data.scale !== '') {
+        // Exact string match (fresh saves store "1.0"/"0.5"/"2.0"/"3.0")...
+        let scaleEl = document.querySelector(`#scale-knob [data-val="${data.scale}"]`);
+        if (!scaleEl) {
+          // ...fall back to numeric match for older saves that stored 1 / 2 / 3.
+          const num = parseFloat(data.scale);
+          document.querySelectorAll('#scale-knob .knob').forEach(k => {
+            if (Math.abs(parseFloat(k.dataset.val) - num) < 0.001) scaleEl = k;
+          });
+        }
         if (scaleEl) setKnob('scale-knob', scaleEl);
       }
       if (data.similarity_method) {
@@ -783,6 +1004,7 @@ pollDashboard();
       document.getElementById('mqtt-server').value = data.mqtt_server || '';
       document.getElementById('mqtt-port').value = data.mqtt_port || 1883;
       document.getElementById('mqtt-topic').value = data.mqtt_topic || '';
+      document.getElementById('anomaly-dedupe').value = data.anomaly_dedupe_threshold || 0.87;
       if (data.zone) {
         document.getElementById('zone-x').value = data.zone.x;
         document.getElementById('zone-y').value = data.zone.y;

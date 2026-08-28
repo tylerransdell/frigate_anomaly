@@ -36,6 +36,7 @@ import requests
 import numpy as np
 import openvino as ov
 import torch
+import shutil
 from PIL import Image
 from torchvision import transforms
 from flask import Flask, render_template, request, jsonify, send_file, Response
@@ -101,9 +102,11 @@ flask_logger.addFilter(_AccessLogFilter())
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
 BASELINE_DIR = BASE_DIR / "baselines"
+ANOMALIES_DIR = BASE_DIR / "anomalies"
+PROFILES_DIR = BASE_DIR / "profiles"
 MODEL_CACHE = BASE_DIR / "model_cache"
-BASELINE_DIR.mkdir(exist_ok=True)
-MODEL_CACHE.mkdir(exist_ok=True)
+for _d in (BASELINE_DIR, ANOMALIES_DIR, PROFILES_DIR, MODEL_CACHE):
+    _d.mkdir(exist_ok=True)
 
 # ============================================================================
 # DEFAULT CONFIG
@@ -111,15 +114,18 @@ MODEL_CACHE.mkdir(exist_ok=True)
 DEFAULT_CONFIG = {
     "frigate_url": "http://192.168.1.100:5000",
     "camera": "",
-    "zone": {"x": 0, "y": 0, "w": 224, "h": 224},
-    "model_size": "half",          # "small" (112), "half" (224) or "full" (518)
-    "scale": 1.0,                  # 0.5, 1.0, or 2.0
-    "threshold": 0.85,
+    "zone": {"x": 0, "y": 0, "w": 224, "h": 224},   # absolute source pixels (NOT normalized)
+    "zone_units": "pixels",
+    "model_size": "half",          # "small" (112) or "half" (224)
+    "scale": 1.0,                  # 0.5, 1.0, 2.0, or 3.0
+    "threshold": 0.89,
     "similarity_method": "mean_top3",   # "nearest" (1 closest baseline) or "mean_top3" (mean of top 3)
     "neighbors": 3,                # top-k closest baselines averaged when using "mean_top3"
     "sampling_interval": 60,       # seconds (min 3; how often to sample)
     "duration_filter": 0,          # seconds, 0 = disabled
     "min_samples": 5,              # min anomalous samples to confirm; 0/null -> 1
+    "max_anomalies": 64,           # at most this many saved anomalies are kept (recent first)
+    "anomaly_dedupe_threshold": 0.87,  # skip saving a new anomaly if a saved one is more similar than this
     "mqtt_server": "",
     "mqtt_port": 1883,
     "mqtt_topic": "frigate/anomaly/alert",
@@ -135,13 +141,19 @@ mqtt_client = None
 
 # Model state
 compiled_model = None
-loaded_model_size = None      # model_size string ("small"/"half"/"full") holds compiled_model
+loaded_model_size = None      # model_size string ("small"/"half") holds compiled_model
 preprocess = None
 
-# Baseline library (1..40 actual images saved under baselines/)
+# Baseline library (1..64 actual images saved under baselines/)
 baseline_paths: list[Path] = []
 baseline_bank = None          # np.ndarray (N, embed_dim), L2-normalized rows
-MAX_BASELINES = 40
+MAX_BASELINES = 64
+
+# Saved anomalies (recent 64 images under anomalies/)
+anomaly_paths: list[Path] = []
+anomaly_bank = None           # np.ndarray (M, embed_dim), L2-normalized rows
+MAX_ANOMALIES = 64
+anomaly_lock = threading.Lock()
 
 # Model-loading state (load runs in background so it never wedges the server)
 model_loading = False          # True while a background model load is in progress
@@ -165,6 +177,7 @@ perf_stats = {
     "last_sim": None,
     "last_status": None,
     "last_detection_at": None,
+    "lowest_sim": None,        # lowest similarity observed since last reset
     "cumulative_infer_ms": 0.0,
     "cumulative_total_ms": 0.0,
 }
@@ -185,7 +198,60 @@ def load_config():
         with open(CONFIG_PATH) as f:
             saved = json.load(f)
         config.update(saved)
+        # "full" (518) was removed — migrate any stored selection to "half".
+        if config.get("model_size") == "full":
+            config["model_size"] = "half"
         log.info("Config loaded from %s", CONFIG_PATH)
+
+def _crop_zone_to(img) -> "Image.Image":
+    """Crop the detection zone out of an arbitrary-resolution image.
+
+    The stored zone is in absolute pixels drawn against the *reference*
+    resolution (zone_ref, from the live snapshot the user banded on). If the
+    incoming image has a different resolution (e.g. recording snapshots are a
+    different size than the live view), scale the zone proportionally so the
+    same scene region is selected regardless of source.
+    """
+    z = config.get("zone") or {}
+    if not (z.get("w", 0) > 0 and z.get("h", 0) > 0):
+        return img
+    ref = config.get("zone_ref") or {}
+    ref_w = float(ref.get("w", img.width))
+    ref_h = float(ref.get("h", img.height))
+    iw, ih = img.size
+    # Scale zone coords from reference resolution onto this image.
+    sx = iw / ref_w
+    sy = ih / ref_h
+    box = (int(round(z["x"] * sx)), int(round(z["y"] * sy)),
+           int(round((z["x"] + z["w"]) * sx)), int(round((z["y"] + z["h"]) * sy)))
+    # Clamp to image bounds (avoid going past the edge if ref is stale).
+    box = (max(0, box[0]), max(0, box[1]),
+           min(iw, box[2]), min(ih, box[3]))
+    if box[2] - box[0] < 1 or box[3] - box[1] < 1:
+        return img
+    return img.crop(box)
+
+
+def _apply_scale(img: "Image.Image") -> "Image.Image":
+    scale = float(config.get("scale", 1.0))
+    if scale != 1.0:
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+    return img
+
+
+def _to_live_resolution(img: "Image.Image") -> "Image.Image":
+    """Resize a recording/other-resolution grab to the live snapshot resolution
+    (zone_ref), high-quality, so the zone and detection framing match exactly.
+
+    If the user runs Frigate detection at full resolution, the live snapshot and
+    the recording already match and this is a no-op (identity)."""
+    ref = config.get("zone_ref") or {}
+    rw = int(ref.get("w", 0))
+    rh = int(ref.get("h", 0))
+    if rw > 0 and rh > 0 and (img.width != rw or img.height != rh):
+        img = img.resize((rw, rh), Image.LANCZOS)
+    return img
+
 
 def save_config():
     with open(CONFIG_PATH, "w") as f:
@@ -195,7 +261,7 @@ def save_config():
 # ============================================================================
 # RESOLUTION HELPERS
 # ============================================================================
-RESOLUTION_MAP = {"full": 518, "half": 224, "small": 112}
+RESOLUTION_MAP = {"half": 224, "small": 112}   # "full" was removed in 0.0.1+; 3x crop replaces it
 
 def get_image_size():
     return RESOLUTION_MAP.get(config.get("model_size", "half"), 224)
@@ -339,6 +405,7 @@ def maybe_autostart():
     try:
         load_model()
         load_baselines()
+        load_anomalies()
         if baseline_bank is None or len(baseline_bank) == 0:
             log.warning("Auto-start: baseline bank empty, skipping engine")
             return
@@ -383,19 +450,10 @@ def fetch_frigate_snapshot() -> Image.Image | None:
         log.error("Failed to fetch snapshot: %s", e)
         return None
 
-    # Crop to zone
-    z = config["zone"]
-    if z["w"] > 0 and z["h"] > 0:
-        img = img.crop((z["x"], z["y"], z["x"] + z["w"], z["y"] + z["h"]))
-
-    # Apply scale
-    scale = config.get("scale", 1.0)
-    if scale != 1.0:
-        new_w = int(img.width * scale)
-        new_h = int(img.height * scale)
-        img = img.resize((new_w, new_h), Image.LANCZOS)
-
-    return img
+    # The zone was drawn on this (live) resolution — record it as the reference
+    # so recording snapshots (a different resolution) scale the zone correctly.
+    config.setdefault("zone_ref", {"w": img.width, "h": img.height})
+    return _apply_scale(_crop_zone_to(img))
 
 def fetch_frigate_cameras(frigate_url: str) -> list[str]:
     """Get list of camera names from Frigate config API."""
@@ -427,12 +485,19 @@ def _next_baseline_index() -> int:
             nums.append(int(m.group(1)))
     return (max(nums, default=0) + 1)
 
+def reset_lowest_score():
+    """Reset the lowest-observed similarity. Called when the baseline bank or
+    the comparison method (top-k) changes, since the old number no longer applies."""
+    with perf_lock:
+        perf_stats["lowest_sim"] = None
+
 def load_baselines():
     """Scan baseline dir, recompute embeddings with the currently loaded model,
     and rebuild the in-memory bank (N x D, L2-normalized rows)."""
     global baseline_paths, baseline_bank
     files = _baseline_files()
     baseline_paths = list(files)
+    reset_lowest_score()
     if not files:
         baseline_bank = None
         log.info("No baseline images found")
@@ -510,7 +575,7 @@ def _baseline_metrics() -> dict[str, dict]:
     return metrics
 
 def evaluate_against_baselines(embedding: np.ndarray, bank: np.ndarray,
-                               threshold: float = 0.85, k: int = 3):
+                               threshold: float = 0.89, k: int = 3):
     """Score a test embedding against the baseline bank.
 
     Similarity = mean cosine of the k closest baselines (or all of them if
@@ -529,6 +594,228 @@ def evaluate_against_baselines(embedding: np.ndarray, bank: np.ndarray,
     confidence = float(np.clip(confidence, 0.0, 1.0) * 100.0)
     is_anomaly = mean_sim < threshold
     return mean_sim, confidence, is_anomaly
+
+# ============================================================================
+# BULK 24 HOUR SAMPLING (one-touch baseline set)
+# ============================================================================
+def fetch_recording_atn(frame_time: float) -> Image.Image | None:
+    """Pull a snapshot from a Frigate recording at a given frame time.
+    URL: /api/:camera/recordings/:frame_time/snapshot.jpg"""
+    url = (f"{config['frigate_url']}/api/{config['camera']}/recordings/"
+           f"{int(frame_time)}/snapshot.jpg")
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        if 'image' not in resp.headers.get('Content-Type', ''):
+            return None
+        img = Image.open(BytesIO(resp.content)).convert("RGB")
+    except Exception as e:
+        log.warning("fetching recording %s failed: %s", frame_time, e)
+        return None
+    # Scale the recording grab to the live snapshot resolution first (so the zone
+    # and detection framing match exactly), then crop the zone and apply scale.
+    return _apply_scale(_crop_zone_to(_to_live_resolution(img)))
+
+
+def bulk_sample_baselines(spacing_minutes: int) -> dict:
+    """Sample every spacing_minutes for the past 24h, adding each as a baseline.
+    60 min -> 24 images, 30 min -> 48 images. Uses whatever recordings exist;
+    never fails the whole run; checks room first."""
+    if not config.get("camera"):
+        return {"ok": False, "error": "No camera configured"}
+    span_hours = 24
+    n_total = int((span_hours * 60) / spacing_minutes)
+    room = MAX_BASELINES - len(_baseline_files())
+    if room < n_total:
+        return {"ok": False, "error":
+                f"No room in baseline store: need {n_total}, only {room} free. "
+                "Delete some baselines first."}
+    if compiled_model is None:
+        load_model()
+    now = time.time()
+    added = 0
+    failures = 0
+    for i in range(n_total):
+        t_start = now - (n_total - 1 - i) * spacing_minutes * 60
+        img = fetch_recording_atn(t_start)
+        if img is None:
+            failures += 1
+            continue
+        if add_baseline_image(img) is None:
+            continue
+        added += 1
+    msg = (f"Added {added} baseline image(s) over 24h@every {spacing_minutes} min; "
+           f"{failures} recording slot(s) unavailable (used what was there).")
+    log.info(msg)
+    return {"ok": True, "added": added, "failed": failures, "message": msg}
+
+
+# ============================================================================
+# SAVED ANOMALIES (recent MAX persist, deduped)
+# ============================================================================
+def _anomaly_files() -> list[Path]:
+    return sorted(ANOMALIES_DIR.glob("anomaly_*.jpg"))
+
+
+def load_anomalies():
+    """Scan the persistent anomaly dir and rebuild the embedding bank."""
+    global anomaly_paths, anomaly_bank
+    files = _anomaly_files()
+    anomaly_paths = list(files)
+    if not files:
+        anomaly_bank = None
+        return
+    if compiled_model is None:
+        load_model()
+    anomaly_bank = np.stack(
+        [get_embedding(Image.open(p).convert("RGB")) for p in files]
+    ).astype(np.float32)
+    log.info("Anomaly bank loaded: %d image(s)", len(files))
+
+
+def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray) -> bool:
+    """Persist a new anomaly unless it's a near-duplicate of a saved one
+    (similarity >= dedupe threshold). Trims to the newest MAX_ANOMALIES.
+    Returns True if saved, False if it was skipped as a duplicate."""
+    with anomaly_lock:
+        if anomaly_bank is not None and len(anomaly_bank) > 0:
+            dedupe = float(config.get("anomaly_dedupe_threshold", 0.87) or 0.87)
+            best = float(np.max(np.dot(anomaly_bank, embedding)))
+            if best >= dedupe:
+                return False
+        files = _anomaly_files()
+        nums = []
+        for p in files:
+            m = re.match(r"anomaly_(\d+)\.jpg", p.name)
+            if m:
+                nums.append(int(m.group(1)))
+        nid = (max(nums, default=0) + 1)
+        image.save(ANOMALIES_DIR / f"anomaly_{nid:03d}.jpg")
+        load_anomalies()
+
+        max_anom = int(config.get("max_anomalies", MAX_ANOMALIES) or MAX_ANOMALIES)
+        while len(_anomaly_files()) > max_anom:
+            oldest = _anomaly_files()[0]
+            try:
+                oldest.unlink()
+            except OSError:
+                break
+        load_anomalies()
+        return True
+
+
+def anomaly_metrics() -> list[dict]:
+    """Per-anomaly nearest-neighbor similarity for the dashboard."""
+    if compiled_model is not None and (anomaly_bank is None or
+                                       len(anomaly_bank) != len(_anomaly_files())):
+        load_anomalies()
+    files = _anomaly_files()
+    n = len(anomaly_bank) if anomaly_bank is not None else 0
+    items = []
+    for idx, p in enumerate(files, start=1):
+        sim = 0.0
+        if anomaly_bank is not None and n > 1:
+            sim = float(np.max(np.delete(np.dot(anomaly_bank[idx - 1], anomaly_bank.T), idx - 1)))
+        items.append({
+            "index": idx,
+            "name": p.name,
+            "image_url": f"/api/anomalies/image/{idx}",
+            "confidence": sim * 100.0,
+        })
+    return items
+
+
+def remove_anomaly_by_index(index: int) -> bool:
+    files = _anomaly_files()
+    if index < 1 or index > len(files):
+        return False
+    try:
+        files[index - 1].unlink()
+    except OSError as e:
+        log.error("Failed to remove anomaly %s: %s", files[index - 1], e)
+        return False
+    load_anomalies()
+    return True
+
+
+# ============================================================================
+# PROFILES (save/load up to 10 full state snapshots)
+# ============================================================================
+MAX_PROFILES = 10
+
+
+def _profile_names() -> list[str]:
+    if not PROFILES_DIR.exists():
+        return []
+    return sorted(d.name for d in PROFILES_DIR.iterdir() if d.is_dir())
+
+
+def save_profile(name: str) -> str | None:
+    """Snapshot current baselines + settings into a profile.
+
+    NOTE: anomalies are intentionally NOT part of a profile — they're a global,
+    standalone store that lives in anomalies/ and is independent of profiles,
+    zones, and regions. Loading a profile never touches them.
+    Returns an error message, or None on success."""
+    name = (name or "").strip().strip("/").strip("\\")
+    if not name:
+        return "Profile name required"
+    names = _profile_names()
+    if name not in names and len(names) >= MAX_PROFILES:
+        return f"No room for another profile ({MAX_PROFILES} max). Delete one first."
+    dest = PROFILES_DIR / name
+    (dest / "baselines").mkdir(parents=True, exist_ok=True)
+    for old in (dest / "baselines").glob("*.jpg"):
+        old.unlink()
+    for src in _baseline_files():
+        shutil.copy2(src, dest / "baselines" / src.name)
+    with open(dest / "config.json", "w") as f:
+        json.dump(config, f, indent=2)
+    log.info("Profile saved: %s", name)
+    return None
+
+
+def load_profile(name: str) -> str | None:
+    """Stop the engine, restore a profile's baselines + settings, and
+    auto-restart. Returns an error message or None on success.
+
+    Only baselines + settings are restored — the saved-anomaly store is global
+    and is left exactly as it is (it does not belong to any profile/zone)."""
+    global config, engine_running
+    if name not in _profile_names():
+        return "Unknown profile"
+    src = PROFILES_DIR / name
+
+    engine_running = False
+    if mqtt_client:
+        try:
+            mqtt_client.loop_stop()
+        except Exception:
+            pass
+
+    for old in BASELINE_DIR.glob("baseline_*.jpg"):
+        old.unlink()
+    for f in (src / "baselines").glob("*.jpg"):
+        shutil.copy2(f, BASELINE_DIR / f.name)
+
+    pcfg = src / "config.json"
+    if pcfg.exists():
+        config.update(DEFAULT_CONFIG)
+        with open(pcfg) as f:
+            config.update(json.load(f))
+        if config.get("model_size") == "full":
+            config["model_size"] = "half"
+        save_config()
+
+    global anomaly_paths, anomaly_bank, baseline_paths, baseline_bank
+    load_baselines()
+    load_anomalies()
+    maybe_autostart()
+    log.info("Profile loaded: %s", name)
+    return None
+
 
 # ============================================================================
 # MQTT SETUP
@@ -649,10 +936,20 @@ def detection_loop():
             t0 = time.perf_counter()
             similarity, confidence, is_anomaly = evaluate_against_baselines(
                 embedding, baseline_bank,
-                threshold=config.get("threshold", 0.85),
+                threshold=config.get("threshold", 0.89),
                 k=get_comparison_k(),
             )
             total_ms = (time.perf_counter() - t_cycle) * 1000.0
+
+            # ---- SAVED ANOMALIES + LOWEST SCORE ----
+            with perf_lock:
+                if perf_stats["lowest_sim"] is None or similarity < perf_stats["lowest_sim"]:
+                    perf_stats["lowest_sim"] = float(similarity)
+            if is_anomaly:
+                try:
+                    maybe_save_anomaly(img, embedding)
+                except Exception as e:
+                    log.exception("Failed to save anomaly: %s", e)
 
             # ---- PERF STATS & DETECTION LOGGING ----
             with perf_lock:
@@ -675,7 +972,7 @@ def detection_loop():
                 "DETECT cam=%s sim=%.4f conf=%.1f%% status=%s thresh=%.2f fetch=%.1fms infer=%.1fms total=%.1fms",
                 config.get("camera"), similarity, confidence,
                 "ANOMALY" if is_anomaly else "NORMAL",
-                config.get("threshold", 0.85),
+                config.get("threshold", 0.89),
                 fetch_ms, infer_ms, total_ms,
             )
 
@@ -772,6 +1069,9 @@ def get_config():
 def post_config():
     global config
     config.update(request.json)
+    # Top-k / similarity method / threshold all changed -> reset lowest score,
+    # since the old observed minimum no longer applies to the new comparison.
+    reset_lowest_score()
     save_config()
     return jsonify({"status": "Config saved"})
 
@@ -815,7 +1115,7 @@ def api_capture_baseline():
     if not config.get("camera"):
         return jsonify({"error": "No camera configured"}), 400
     if len(_baseline_files()) >= MAX_BASELINES:
-        return jsonify({"error": "Baseline bank full (40/40). Delete baseline images before adding more."}), 409
+        return jsonify({"error": "Baseline bank full. Delete baseline images before adding more."}), 409
     try:
         if capture_baseline_image():
             return jsonify({"status": "ok", "count": len(_baseline_files())})
@@ -872,7 +1172,7 @@ def api_latest_baseline_image():
 def api_add_baseline():
     """Add an image (e.g. picked from the live dashboard) as a new baseline."""
     if len(_baseline_files()) >= MAX_BASELINES:
-        return jsonify({"error": "Baseline bank full (40/40). Delete baseline images before adding more."}), 409
+        return jsonify({"error": "Baseline bank full. Delete baseline images before adding more."}), 409
     data = request.get_json(silent=True) or {}
     image_url = data.get("image_url", "")
     try:
@@ -883,7 +1183,7 @@ def api_add_baseline():
             return jsonify({"error": "Unsupported image format"}), 400
         path = add_baseline_image(img)
         if path is None:
-            return jsonify({"error": "Baseline bank full (40/40). Delete baseline images before adding more."}), 409
+            return jsonify({"error": "Baseline bank full. Delete baseline images before adding more."}), 409
         return jsonify({"status": "ok", "count": len(_baseline_files())})
     except Exception as e:
         log.exception("Failed to add baseline")
@@ -894,6 +1194,97 @@ def api_remove_baseline(index: int):
     if remove_baseline_by_index(index):
         return jsonify({"status": "ok", "count": len(_baseline_files())})
     return jsonify({"error": "Invalid baseline index"}), 400
+
+@app.route("/api/baseline/bulk", methods=["POST"])
+def api_bulk_sample():
+    """One-touch 24h baseline set: 24 (hourly) or 48 (every 30 min) samples."""
+    data = request.get_json(silent=True) or {}
+    minutes = int(data.get("minutes", 60))
+    if minutes not in (30, 60):
+        return jsonify({"error": "minutes must be 30 or 60"}), 400
+    if not config.get("camera"):
+        return jsonify({"error": "No camera configured"}), 400
+    try:
+        report = bulk_sample_baselines(minutes)
+        code = 200 if report.get("ok") else 409
+        return jsonify(report), code
+    except Exception as e:
+        log.exception("Bulk sample failed")
+        return jsonify({"error": str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# Saved anomalies
+# ---------------------------------------------------------------------------
+@app.route("/api/anomalies/list")
+def api_anomalies_list():
+    return jsonify({"anomalies": anomaly_metrics(),
+                    "count": len(_anomaly_files()),
+                    "max": int(config.get("max_anomalies", MAX_ANOMALIES) or MAX_ANOMALIES)})
+
+@app.route("/api/anomalies/image/<int:index>")
+def api_anomaly_image(index: int):
+    files = _anomaly_files()
+    if index < 1 or index > len(files):
+        return jsonify({"error": "No anomaly"}), 404
+    return send_file(files[index - 1], mimetype="image/jpeg")
+
+@app.route("/api/anomalies/remove/<int:index>", methods=["POST"])
+def api_remove_anomaly(index: int):
+    if remove_anomaly_by_index(index):
+        return jsonify({"status": "ok", "count": len(_anomaly_files())})
+    return jsonify({"error": "Invalid anomaly index"}), 400
+
+@app.route("/api/anomalies/add-baseline/<int:index>", methods=["POST"])
+def api_add_anomaly_as_baseline(index: int):
+    files = _anomaly_files()
+    if index < 1 or index > len(files):
+        return jsonify({"error": "Invalid anomaly index"}), 400
+    if len(_baseline_files()) >= MAX_BASELINES:
+        return jsonify({"error": "Baseline bank full. Delete baseline images before adding more."}), 409
+    img = Image.open(files[index - 1]).convert("RGB")
+    # Anomaly store captures are not guaranteed to match the baseline/live
+    # resolution — scale to the live snapshot resolution so the baseline is
+    # consistent with everything else (same framing the zone expects).
+    img = _to_live_resolution(img)
+    path = add_baseline_image(img)
+    if path is None:
+        return jsonify({"error": "Baseline bank full. Delete baseline images before adding more."}), 409
+    return jsonify({"status": "ok", "count": len(_baseline_files())})
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+@app.route("/api/profiles")
+def api_profiles_list():
+    return jsonify({"profiles": _profile_names(), "max": MAX_PROFILES})
+
+@app.route("/api/profiles/save", methods=["POST"])
+def api_profiles_save():
+    data = request.get_json(silent=True) or {}
+    err = save_profile(data.get("name", ""))
+    if err:
+        return jsonify({"error": err}), 409
+    return jsonify({"status": "ok", "profiles": _profile_names()})
+
+@app.route("/api/profiles/load", methods=["POST"])
+def api_profiles_load():
+    data = request.get_json(silent=True) or {}
+    err = load_profile(data.get("name", ""))
+    if err:
+        return jsonify({"error": err}), 400
+    return jsonify({"status": "ok", "running": engine_running})
+
+@app.route("/api/profiles/delete", methods=["POST"])
+def api_profiles_delete():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name", "") or "").strip().strip("/").strip("\\")
+    if not name:
+        return jsonify({"error": "Profile name required"}), 400
+    target = PROFILES_DIR / name
+    if not target.is_dir():
+        return jsonify({"error": "Unknown profile"}), 400
+    shutil.rmtree(target)
+    return jsonify({"status": "ok", "profiles": _profile_names()})
 
 @app.route("/api/engine/start", methods=["POST"])
 def api_start_engine():
@@ -997,6 +1388,7 @@ def api_dashboard():
         "model_loading": model_loading,
         "model_error": model_error,
         "perf": perf,
+        "anomaly_count": len(_anomaly_files()),
     }
     return jsonify(_json_safe(payload))
 

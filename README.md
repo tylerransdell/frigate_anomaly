@@ -21,15 +21,29 @@ One educated guess for confidence and you suddenly have a smart detector. No tra
 ✅ **Does:**
 - Pulls snapshots straight from the Frigate API (no auth, local use).
 - Lets you pick a camera, draw a zone, and capture baselines.
-- Keeps a **baseline library of up to 40 images**, so your "normal" is more than one lucky snapshot.
+- Keeps a **baseline library of up to 64 images**, so your "normal" is more than one lucky snapshot — grab a 24-hour set from recordings in one click.
+- Everything lives in the UI — no editing JSON or YAML by hand.
+- Models: pick **Small (112)** or **Half (224)**; the old full (518) model is gone.
+- Scoring: choose k-NN with **k=1 (nearest)** or **k=3 (mean of top 3)**.
+- Sample + duration filters improve accuracy and fit the whole thing to the real-world problem.
+- Auto-pull baselines from recordings: grab **1 now**, **24 (past 24 hours, hourly)**, or **48 (every 30 min)** at once. Only have 18 hours recorded? It pulls what it can — it doesn't choke.
+- Tracks a running **"lowest observed similarity"** to help tune (resets when the config changes).
+- Saves up to **64 unique anomalies** as a **global store** — not bound to any profile, zone, camera, or boundary. Deduped by a configurable similarity threshold against previously saved ones.
+- Easy to remove baselines or promote them from the live/history dashboards.
 - Runs the DINOv2 vision model through **OpenVINO only** (iGPU/CPU — no CUDA drama).
-- Gives you basic filtering and interval sampling, speeding up whenever an anomaly is actually brewing.
-- Includes a tiny dashboard so you can see what it's flagging.
-- Runs as **one instance** — single camera, zero swag.
+- Saves **profiles** (baselines + settings) and loads them from a drop-down.
 
-❌ **Doesn't (yet):**
-- No multi-camera, no docker-compose, no auth, no Home Assistant integration.
-- No GPU-vendor hopping. It's **OpenVINO or nothing**.
+**Won't fix** — deliberate proof-of-concept scoping. This is a *campaign*, not a *maintain*:
+- The **UI is what ships**. No HTTP API for third parties; not written for live external control by an agent or Home Assistant.
+- The **inference is global-token-only** by design — good for zero-shot anomaly detection and tampering, not for finding dents/scratches/tears. No per-region/local modeling.
+- **OpenVINO only** — no GPU-vendor hopping (I can't test others).
+- **Ugly UI.** It is what it is. It works.
+- Proof-of-concept codebase: stable if used as intended, less stable if you click fast and stack features.
+
+**Not yet** (could happen, no commitment):
+- No multi-camera, no docker-compose/container — it's a script. Wrap it in systemd if you want it to survive reboots.
+- **No Frigate auth** — it needs an open port on your LAN.
+- Zone is **rigid pixel boundaries** — resizing the detection stream changes the numbers (DINO tolerates slight aspect drift, so normalizing is plausible).
 - Nothing fancy at all, honestly. It's v0.0. Manage your expectations.
 
 ---
@@ -71,11 +85,13 @@ About **35ms per inference** on a **Meteor Lake** iGPU with the **half (224) mod
 This is textbook **k-nearest-neighbors** on the baseline library:
 
 1. Every captured baseline is turned into an embedding — a compact vector fingerprint of the scene.
-2. Every live snapshot becomes an embedding too, then gets scored against your whole **baseline library (up to 40 images)**.
+2. Every live snapshot becomes an embedding too, then gets scored against your whole **baseline library (up to 64 images)**.
 3. Pick the method: score against your **single nearest neighbor** (k=1) or the **mean of the top 3 nearest** (k=3 / "mean of top 3").
 4. That similarity hits your **Anomaly Threshold** — under it, it's an anomaly; at or above it, normal.
 
 The baseline dashboard previews each image's confidence (its own nearest-neighbor similarity), so you can spot duplicates or outliers in your "normal" set before they skew detection.
+
+**Live vs. recording resolution:** live snapshots come from Frigate's **detect stream** (whatever you've set there), while the 24h/48h batch pulls its set straight off **recordings** (Frigate's main-stream grabs). If those are the **same resolution, great — nothing to do**. If they differ, the batch is **high-quality downscaled to the live snapshot's resolution** before the zone is cut, so every baseline covers exactly the same scene framing you boxed. (Run Frigate detection at full resolution and batch == live automatically.)
 
 ---
 
@@ -85,9 +101,9 @@ The baseline dashboard previews each image's confidence (its own nearest-neighbo
 2. Enter your Frigate URL, like `http://192.168.1.x:5000` — **no auth yet**, so just make sure it's reachable on your LAN.
 3. Click **Fetch Cameras**, then pick your camera.
 4. Click **Load Camera Snapshot** so you can actually see what the camera sees.
-5. Tweak **Model Area** (Half 224 / Full 518) and **Crop** (0.5× / 1.0× / 2.0×) to your taste.
+5. Tweak **Model Area** (Small 112 / Half 224) and **Crop** (0.25× / 0.5× / 1.0× / 2.0× / 3.0×) to your taste. The old 518 model is gone — crank the crop against **Half** instead when you need a much bigger area.
 6. **Click-drag** a box on the image to select the zone you care about.
-7. Click **Capture Baseline** — that's your "everything is normal" picture. Keep adding snapshots to the **Baseline Library** (up to 40) to cover more normal variety; you can pull them straight from the live dashboard too.
+7. Click **Capture Baseline** — that's your "everything is normal" picture. Keep adding snapshots to the **Baseline Library** (up to 64) to cover more normal variety; you can pull them straight from the live dashboard, or **grab a 24-hour set from recordings** in one click (24 hourly or 48 every-30-min samples).
 8. Pick a **Similarity Method** — **Nearest 1** scores against your single closest baseline, or **Mean of top 3** scores against the average of your 3 closest (or however many you've saved). Same **Anomaly Threshold** line applies to whichever you choose.
 9. Review the **Sampling & Duration** filters, and flip them on if you want.
 10. Hit **Start Engine** and let it do its thing.
@@ -106,7 +122,7 @@ The inference engine will fire up automatically on startup, but only once everyt
 - **Server** (Frigate URL)
 - **Camera**
 - **Detect area**
-- **At least one baseline image** (the library holds up to 40)
+- **At least one baseline image** (the library holds up to 64)
 
 Once all four are configured and saved, the engine starts on launch and does its thing.
 
@@ -115,14 +131,10 @@ Once all four are configured and saved, the engine starts on launch and does its
 ## ✋ Fine Print & Caveats
 
 - `server.py` compiles the OpenVINO IR once and caches it under `model_cache/`. If you delete that folder, it'll rebuild itself.
-- Your settings live in `config.json` (git-ignored), and your baselines live in `baselines/` (also git-ignored). Both are just plain files on disk. Up to 40 baseline images, compared as the mean of the 3 nearest — they persist across restarts.
+- Your settings live in `config.json` (git-ignored), and your baselines live in `baselines/` (also git-ignored). Both are just plain files on disk. Up to 64 baseline images, compared by your chosen method — they persist across restarts.
 - **Honest warning:** there's no auth, no HTTPS, nothing. Run it on a trusted LAN and don't port-forward it.
 
 ---
-
-## Roadmap (maybe)
-
-Multiple detectors. Polish. Static container. Things like that.
 
 ## License
 
