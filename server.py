@@ -130,6 +130,17 @@ DEFAULT_CONFIG = {
     "mqtt_server": "",
     "mqtt_port": 1883,
     "mqtt_topic": "frigate/anomaly/alert",
+    # Per-camera detection zones. Each entry is that camera's zone drawn on a
+    # snapshot of THAT camera at THAT camera's resolution:
+    #     "zones": {
+    #         "back": {"x":..,"y":..,"w":..,"h":.., "ref": {"w":1280,"h":720}},
+    #         "side": {...},
+    #     }
+    # "ref" is the resolution of the snapshot the zone was drawn against, and
+    # is what makes cropping correct for any other-resolution source (recording
+    # grabs etc.). A zone is meaningless unless it was drawn on this camera —
+    # we never reuse one camera's pixels to crop another's scene.
+    "zones": {},
 }
 
 # ============================================================================
@@ -202,21 +213,59 @@ def load_config():
         # "full" (518) was removed — migrate any stored selection to "half".
         if config.get("model_size") == "full":
             config["model_size"] = "half"
+        _migrate_legacy_zone()
         log.info("Config loaded from %s", CONFIG_PATH)
+
+def _migrate_legacy_zone():
+    """Fold the pre-per-camera `zone` + `zone_ref` fields into `zones` so
+    existing single-camera setups keep working without a redraw."""
+    zones = config.setdefault("zones", {})
+    if not zones:
+        z = config.get("zone") or {}
+        ref = config.get("zone_ref") or {}
+        cam = config.get("camera") or ""
+        if (z.get("w", 0) > 0 and z.get("h", 0) > 0
+                and ref.get("w", 0) > 0 and ref.get("h", 0) > 0 and cam):
+            zones[cam] = {**z, "ref": dict(ref)}
+            log.info("Migrated legacy zone into per-camera zones[%s]", cam)
+    # Drop the short-lived experiment from the previous broken attempt.
+    config.pop("zone_ref_camera", None)
+
+def _zone_usable(z) -> bool:
+    """True when z is a fully-usable zone: non-zero rect + a non-zero ref
+    resolution it was drawn against."""
+    z = z or {}
+    ref = z.get("ref") or {}
+    return bool(
+        z.get("w", 0) > 0 and z.get("h", 0) > 0
+        and ref.get("w", 0) > 0 and ref.get("h", 0) > 0
+    )
+
+def _active_zone() -> dict:
+    """The usable zone for the CURRENTLY configured camera, or {} if the
+    current camera has never had a zone drawn (or it was cleared)."""
+    cam = config.get("camera") or ""
+    z = (config.get("zones") or {}).get(cam) or {}
+    if not _zone_usable(z):
+        return {}
+    return z
 
 def _crop_zone_to(img) -> "Image.Image":
     """Crop the detection zone out of an arbitrary-resolution image.
 
-    The stored zone is in absolute pixels drawn against the *reference*
-    resolution (zone_ref, from the live snapshot the user banded on). If the
-    incoming image has a different resolution (e.g. recording snapshots are a
-    different size than the live view), scale the zone proportionally so the
-    same scene region is selected regardless of source.
+    The active zone is stored in absolute pixels drawn against *this* camera's
+    reference resolution (its saved `ref`). If the incoming image has a
+    different resolution (e.g. recording snapshots are a different size than
+    the live view), scale the zone proportionally so the same scene region is
+    selected regardless of source.
+
+    If the current camera has no usable zone, the image is returned untouched —
+    callers that SAVE results (baselines) must refuse rather than store that.
     """
-    z = config.get("zone") or {}
-    if not (z.get("w", 0) > 0 and z.get("h", 0) > 0):
+    z = _active_zone()
+    if not z:
         return img
-    ref = config.get("zone_ref") or {}
+    ref = z.get("ref") or {}
     ref_w = float(ref.get("w", img.width))
     ref_h = float(ref.get("h", img.height))
     iw, ih = img.size
@@ -255,11 +304,13 @@ def _apply_scale(img: "Image.Image") -> "Image.Image":
 
 def _to_live_resolution(img: "Image.Image") -> "Image.Image":
     """Resize a recording/other-resolution grab to the live snapshot resolution
-    (zone_ref), high-quality, so the zone and detection framing match exactly.
+    (the active zone's ref), high-quality, so the zone and detection framing
+    match exactly.
 
     If the user runs Frigate detection at full resolution, the live snapshot and
     the recording already match and this is a no-op (identity)."""
-    ref = config.get("zone_ref") or {}
+    z = _active_zone()
+    ref = z.get("ref") or {}
     rw = int(ref.get("w", 0))
     rh = int(ref.get("h", 0))
     if rw > 0 and rh > 0 and (img.width != rw or img.height != rh):
@@ -393,9 +444,9 @@ def ready_to_autostart() -> str | None:
         return "no frigate URL configured"
     if not config.get("camera"):
         return "no camera"
-    z = config.get("zone") or {}
-    if not (z.get("w", 0) > 0 and z.get("h", 0) > 0):
-        return "no zone coordinates"
+    z = _active_zone()
+    if not z:
+        return "no zone for this camera"
     if int(z.get("w", 0) * z.get("h", 0)) < 1:
         return "zone has zero area"
 
@@ -454,7 +505,14 @@ def get_embedding(image: Image.Image) -> np.ndarray:
 # FRIGATE API HELPERS
 # ============================================================================
 def fetch_frigate_snapshot() -> Image.Image | None:
-    """Pull latest.jpg from Frigate, crop to zone, apply scale."""
+    """Pull latest.jpg from Frigate and crop the active camera's zone.
+
+    The zone (and its reference resolution) belong to the currently configured
+    camera only; the front end sends the exact resolution it drew the zone on
+    (via /api/config) so we never guess or mutate zone_ref here. If this camera
+    has no zone yet, the returned image is the full frame — callers that SAVE
+    (baseline capture) must refuse, not store that.
+    """
     url = f"{config['frigate_url']}/api/{config['camera']}/latest.jpg"
     try:
         resp = requests.get(url, timeout=10)
@@ -464,9 +522,6 @@ def fetch_frigate_snapshot() -> Image.Image | None:
         log.error("Failed to fetch snapshot: %s", e)
         return None
 
-    # The zone was drawn on this (live) resolution — record it as the reference
-    # so recording snapshots (a different resolution) scale the zone correctly.
-    config.setdefault("zone_ref", {"w": img.width, "h": img.height})
     return _apply_scale(_crop_zone_to(img))
 
 def fetch_frigate_cameras(frigate_url: str) -> list[str]:
@@ -555,14 +610,24 @@ def remove_baseline_by_index(index: int) -> bool:
     load_baselines()
     return True
 
-def capture_baseline_image() -> bool:
-    """Capture current zone as a new baseline image."""
+def capture_baseline_image() -> str | None:
+    """Capture the current camera's zone as a new baseline.
+
+    Returns None on success, or an error-message string describing why the
+    capture was refused (e.g. no zone drawn for this camera). We refuse rather
+    than save the whole frame or a miscrop, so a bad zone can never silently
+    produce a corrupt baseline."""
+    if not _active_zone():
+        return ("No zone set for this camera. Draw the zone on the snapshot "
+                "(red box) first — every camera needs its own zone.")
     if compiled_model is None:
         load_model()
     img = fetch_frigate_snapshot()
     if img is None:
-        return False
-    return add_baseline_image(img) is not None
+        return "Failed to fetch snapshot from Frigate"
+    if add_baseline_image(img) is None:
+        return "Baseline bank full"
+    return None
 
 def _baseline_metrics() -> dict[str, dict]:
     """Per-baseline nearest-neighbor confidence.
@@ -639,6 +704,10 @@ def bulk_sample_baselines(spacing_minutes: int) -> dict:
     never fails the whole run; checks room first."""
     if not config.get("camera"):
         return {"ok": False, "error": "No camera configured"}
+    if not _active_zone():
+        return {"ok": False, "error":
+                "No zone set for this camera. Draw the zone on the snapshot "
+                "(red box) first — every camera needs its own zone."}
     span_hours = 24
     n_total = int((span_hours * 60) / spacing_minutes)
     room = MAX_BASELINES - len(_baseline_files())
@@ -898,6 +967,20 @@ def add_snippet(image: Image.Image, similarity: float, is_anomaly: bool):
 # ============================================================================
 # DETECTION ENGINE (Background Thread)
 # ============================================================================
+_last_no_zone_warn = 0.0
+
+def _maybe_warn_no_zone():
+    """Rate-limit the 'no zone for this camera' warning (every 30s max)."""
+    global _last_no_zone_warn
+    now = time.time()
+    if now - _last_no_zone_warn > 30:
+        log.warning(
+            "Detection skipped: no zone drawn for camera %s yet. Open the web "
+            "UI and draw the zone (red box) before starting detection.",
+            config.get("camera"),
+        )
+        _last_no_zone_warn = now
+
 def detection_loop():
     """
     Main detection loop. Schedules interval sampling, and during an active
@@ -931,6 +1014,12 @@ def detection_loop():
 
             if not engine_running:
                 break
+
+            # No zone for this camera yet -> nothing to sample. Refuse to run
+            # on the whole frame or on another camera's zone.
+            if not _active_zone():
+                _maybe_warn_no_zone()
+                continue
 
             # ---- FETCH & PROCESS ----
             t_cycle = time.perf_counter()
@@ -1082,9 +1171,57 @@ def get_config():
 @app.route("/api/config", methods=["POST"])
 def post_config():
     global config
-    config.update(request.json)
-    # Top-k / similarity method / threshold all changed -> reset lowest score,
-    # since the old observed minimum no longer applies to the new comparison.
+    old_camera = config.get("camera")
+    incoming = request.json or {}
+    config.update(incoming)
+    cam = config.get("camera") or ""
+    zones = config.setdefault("zones", {})
+    z = incoming.get("zone") or {}
+    zref = incoming.get("zone_ref")
+    has_drawn_zone = bool(
+        z.get("w", 0) > 0 and z.get("h", 0) > 0
+        and zref and zref.get("w", 0) > 0 and zref.get("h", 0) > 0
+    )
+
+    if old_camera != cam:
+        # ---- CAMERA SWITCHED ----
+        # Zones are per-camera: never reuse another camera's pixels. Prefer a
+        # zone drawn in this same request; else restore the new camera's saved
+        # zone; else clear (user must draw one).
+        if has_drawn_zone:
+            zones[cam] = {**z, "ref": {"w": int(zref["w"]), "h": int(zref["h"])}}
+            log.info("Camera %s -> %s: stored freshly drawn zone", old_camera, cam)
+        active = zones.get(cam) or {}
+        if _zone_usable(active):
+            config["zone"] = {k: active[k] for k in ("x", "y", "w", "h")}
+            config["zone_ref"] = dict(active["ref"])
+            log.info("Camera %s -> %s: active zone %s (ref %s)",
+                     old_camera, cam, config["zone"], config["zone_ref"])
+        else:
+            config["zone"] = {"x": 0, "y": 0, "w": 0, "h": 0}
+            config["zone_ref"] = None
+            log.warning("Camera %s -> %s: no zone for this camera yet — "
+                        "draw it in the UI before capturing baselines.",
+                        old_camera, cam)
+    else:
+        # ---- SAME CAMERA ----
+        if has_drawn_zone:
+            zones[cam] = {**z, "ref": {"w": int(zref["w"]), "h": int(zref["h"])}}
+            config["zone"] = {**z}
+            config["zone_ref"] = dict(zones[cam]["ref"])
+            log.info("Zone saved for %s: %s (ref %s)",
+                     cam, config["zone"], config["zone_ref"])
+        elif z.get("w", 0) <= 0 and z.get("h", 0) <= 0:
+            # Explicitly-cleared zone (fresh camera switch, nothing drawn).
+            zones.pop(cam, None)
+            config["zone"] = {"x": 0, "y": 0, "w": 0, "h": 0}
+            config["zone_ref"] = None
+            log.info("Zone cleared for %s", cam)
+        elif z:
+            # Non-zero zone arrived without a valid ref — this is a stale or
+            # hand-crafted payload. Don't store a zone we can't crop correctly.
+            log.warning("Zone save for %s ignored (missing valid zone_ref)", cam)
+
     reset_lowest_score()
     save_config()
     return jsonify({"status": "Config saved"})
@@ -1131,9 +1268,12 @@ def api_capture_baseline():
     if len(_baseline_files()) >= MAX_BASELINES:
         return jsonify({"error": "Baseline bank full. Delete baseline images before adding more."}), 409
     try:
-        if capture_baseline_image():
+        err = capture_baseline_image()
+        if err is None:
             return jsonify({"status": "ok", "count": len(_baseline_files())})
-        return jsonify({"error": "Failed to capture"}), 500
+        # Refused (e.g. no zone drawn for this camera) — tell the user why
+        # instead of saving a whole-frame / miscropped baseline.
+        return jsonify({"error": err}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

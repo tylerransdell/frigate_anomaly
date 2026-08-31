@@ -7,6 +7,19 @@
     "w": 224,
     "h": 224
   },
+  "zone_ref": {
+    "w": 1280,
+    "h": 720
+  },
+  "zones": {
+    "back": {
+      "x": 800,
+      "y": 400,
+      "w": 224,
+      "h": 224,
+      "ref": {"w": 1280, "h": 720}
+    }
+  },
   "zone_units": "pixels",
   "model_size": "half",
   "scale": 1,
@@ -20,9 +33,5 @@
   "anomaly_dedupe_threshold": 0.87,
   "mqtt_server": "",
   "mqtt_port": 1883,
-  "mqtt_topic": "frigate/anomaly/alert",
-  "zone_ref": {
-    "w": 1280,
-    "h": 720
-  }
+  "mqtt_topic": "frigate/anomaly/alert"
 }

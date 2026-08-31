@@ -187,7 +187,7 @@
     <label style="margin-top: 12px;">Camera Name
         <span class="hint">Select a camera from the dropdown</span>
     </label>
-    <select id="camera_name" style="width: 100%;">
+    <select id="camera_name" style="width: 100%;" onchange="onCameraChanged()">
         <option value="">-- Select a camera --</option>
     </select>
 
@@ -226,6 +226,10 @@
     <div><label>W</label><input id="zone-w" type="number" value="0" readonly></div>
     <div><label>H</label><input id="zone-h" type="number" value="0" readonly></div>
   </div>
+  <!-- Resolution of the snapshot the zone was drawn on. This is what makes
+       the crop correct per camera: a zone is meaningless without it. -->
+  <input type="hidden" id="zone-ref-w" value="0">
+  <input type="hidden" id="zone-ref-h" value="0">
 </div>
 
 <!-- MODEL SETTINGS -->
@@ -442,6 +446,85 @@ async function loadCameras() {
     }
 }
 
+// Called when the user picks a different camera in the dropdown. Zones are
+// per-camera: each camera's zone lives on the server keyed by its own name.
+// We clear the on-screen box (it belongs to the previous scene), ask the
+// server to swap to this camera's saved zone (or clear if none), then read
+// back whatever it settled on and redraw it on the fresh snapshot.
+async function onCameraChanged() {
+  const statusEl = document.getElementById('camera-status');
+  const cam = document.getElementById('camera_name').value;
+
+  // Clear the stale on-screen zone box + coordinate fields immediately.
+  const box = document.getElementById('zone-box');
+  if (box) box.style.display = 'none';
+  document.getElementById('zone-x').value = 0;
+  document.getElementById('zone-y').value = 0;
+  document.getElementById('zone-w').value = 0;
+  document.getElementById('zone-h').value = 0;
+  document.getElementById('zone-ref-w').value = 0;
+  document.getElementById('zone-ref-h').value = 0;
+
+  // Persist the camera change; the server restores that camera's saved zone
+  // (with its own ref) or clears it. It refuses to store a zeroed zone as a
+  // usable baseline, so nothing bad can be captured.
+  await saveConfig();
+
+  // Read back what the server settled on for this camera and show it.
+  try {
+    const res = await fetch('/api/config');
+    const d = await res.json();
+    const z = d.zone || {};
+    if (z.w > 0 && z.h > 0) {
+      document.getElementById('zone-x').value = z.x;
+      document.getElementById('zone-y').value = z.y;
+      document.getElementById('zone-w').value = z.w;
+      document.getElementById('zone-h').value = z.h;
+      if (d.zone_ref && d.zone_ref.w > 0) {
+        document.getElementById('zone-ref-w').value = d.zone_ref.w;
+        document.getElementById('zone-ref-h').value = d.zone_ref.h;
+      }
+      if (statusEl) {
+        statusEl.textContent = `✓ Restored saved zone for "${cam}". You can keep it or redraw.`;
+        statusEl.style.color = '#4caf50';
+      }
+    } else {
+      if (statusEl) {
+        statusEl.textContent = `⚠ No saved zone for "${cam}" yet — draw the red box on the snapshot before capturing baselines.`;
+        statusEl.style.color = '#ffa502';
+      }
+    }
+  } catch (e) {}
+
+  // Reload the snapshot for the new camera and draw the (restored or empty) box.
+  refreshSnapshot();
+}
+
+// Draw the current zone box on the just-loaded snapshot (source coords ->
+// display coords), or hide it if there's no zone yet. Lets the user see the
+// saved per-camera zone immediately on switch/refresh.
+function drawSavedZoneOverlay(img) {
+  const box = document.getElementById('zone-box');
+  if (!box || !img) return;
+  const zx = parseInt(document.getElementById('zone-x').value) || 0;
+  const zy = parseInt(document.getElementById('zone-y').value) || 0;
+  const zw = parseInt(document.getElementById('zone-w').value) || 0;
+  const zh = parseInt(document.getElementById('zone-h').value) || 0;
+  if (!(zw > 0 && zh > 0) || !img.naturalWidth || !img.naturalHeight) {
+    box.style.display = 'none';
+    return;
+  }
+  const rect = img.getBoundingClientRect();
+  const sx = rect.width / img.naturalWidth;
+  const sy = rect.height / img.naturalHeight;
+  box.style.display = 'block';
+  box.style.left   = Math.round(zx * sx) + 'px';
+  box.style.top    = Math.round(zy * sy) + 'px';
+  box.style.width  = Math.round(zw * sx) + 'px';
+  box.style.height = Math.round(zh * sy) + 'px';
+}
+
+
 
 // Refresh snapshot for zone drawing
 async function refreshSnapshot() {
@@ -494,6 +577,10 @@ async function refreshSnapshot() {
     wrap.appendChild(img);
     wrap.appendChild(zoneBox);
     container.appendChild(wrap);
+
+    // Draw the saved per-camera zone (if any) so the user immediately sees it
+    // on the freshly-loaded snapshot.
+    drawSavedZoneOverlay(img);
 
     console.log("Container size:", container.offsetWidth, "x", container.offsetHeight);
   };
@@ -673,6 +760,10 @@ zoneContainer.addEventListener('mouseup', e => {
   document.getElementById('zone-y').value = Math.max(0, Math.min(src.y, maxY));
   document.getElementById('zone-w').value = src.w;
   document.getElementById('zone-h').value = src.h;
+  // The zone was drawn on a snapshot of THIS resolution — record it so the
+  // server can crop exactly this scene region (per camera, never reused).
+  document.getElementById('zone-ref-w').value = img.naturalWidth;
+  document.getElementById('zone-ref-h').value = img.naturalHeight;
   updateZoneHint();
 });
 
@@ -687,6 +778,13 @@ async function saveConfig() {
       y: parseInt(document.getElementById('zone-y').value),
       w: parseInt(document.getElementById('zone-w').value),
       h: parseInt(document.getElementById('zone-h').value),
+    },
+    // Resolution the zone was drawn on (authoritative, per camera). The server
+    // refuses to store/crop a zone without it — otherwise it would silently
+    // mis-crop on other cameras.
+    zone_ref: {
+      w: parseInt(document.getElementById('zone-ref-w').value) || 0,
+      h: parseInt(document.getElementById('zone-ref-h').value) || 0,
     },
     model_size: getKnob('model-size-knob'),
     scale: getKnob('scale-knob'),   // keep the raw string ("0.5"/"1.0"/"2.0"/"3.0") so it round-trips
@@ -1092,6 +1190,10 @@ pollDashboard();
         document.getElementById('zone-y').value = data.zone.y;
         document.getElementById('zone-w').value = data.zone.w;
         document.getElementById('zone-h').value = data.zone.h;
+      }
+      if (data.zone_ref && data.zone_ref.w > 0) {
+        document.getElementById('zone-ref-w').value = data.zone_ref.w;
+        document.getElementById('zone-ref-h').value = data.zone_ref.h;
       }
       updateEngineStatus(data.engine_running);
       updateModelStatus(data);
