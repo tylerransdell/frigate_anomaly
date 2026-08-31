@@ -68,6 +68,8 @@ Note: On the first run, the script compiles the OpenVINO IR model and caches it 
 
 ![dino.png](dino.png)
 
+*Outdated — live dashboard & anomaly store do one-click baseline upgrade now. Still just as ugly.*
+
 ---
 
 ## How It Decides (k-NN & Resolution Matching)
