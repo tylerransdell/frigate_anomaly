@@ -117,14 +117,15 @@ DEFAULT_CONFIG = {
     "zone": {"x": 0, "y": 0, "w": 224, "h": 224},   # absolute source pixels (NOT normalized)
     "zone_units": "pixels",
     "model_size": "half",          # "small" (112) or "half" (224)
-    "scale": 1.0,                  # 0.5, 1.0, 2.0, or 3.0
+    "scale": 1.0,                  # 0.5, 1.0, 2.0, or 3.0 — or "free" (user-drawn, resized to model input)
+    "zone_shape": "rect",          # "rect" (numeric crop scale) or "free" (user-drawn, resized to model input)
     "threshold": 0.89,
     "similarity_method": "mean_top3",   # "nearest" (1 closest baseline) or "mean_top3" (mean of top 3)
     "neighbors": 3,                # top-k closest baselines averaged when using "mean_top3"
     "sampling_interval": 60,       # seconds (min 3; how often to sample)
     "duration_filter": 0,          # seconds, 0 = disabled
     "min_samples": 5,              # min anomalous samples to confirm; 0/null -> 1
-    "max_anomalies": 64,           # at most this many saved anomalies are kept (recent first)
+    "max_anomalies": 128,           # at most this many saved anomalies are kept (recent first)
     "anomaly_dedupe_threshold": 0.87,  # skip saving a new anomaly if a saved one is more similar than this
     "mqtt_server": "",
     "mqtt_port": 1883,
@@ -149,10 +150,10 @@ baseline_paths: list[Path] = []
 baseline_bank = None          # np.ndarray (N, embed_dim), L2-normalized rows
 MAX_BASELINES = 64
 
-# Saved anomalies (recent 64 images under anomalies/)
+# Saved anomalies (recent 128 images under anomalies/)
 anomaly_paths: list[Path] = []
 anomaly_bank = None           # np.ndarray (M, embed_dim), L2-normalized rows
-MAX_ANOMALIES = 64
+MAX_ANOMALIES = 128
 anomaly_lock = threading.Lock()
 
 # Model-loading state (load runs in background so it never wedges the server)
@@ -233,7 +234,20 @@ def _crop_zone_to(img) -> "Image.Image":
 
 
 def _apply_scale(img: "Image.Image") -> "Image.Image":
-    scale = float(config.get("scale", 1.0))
+    """Apply the configured crop-scale to a zone-cropped image.
+
+    - "free" mode: the user drew an arbitrary rect; resize it to the model's
+      target input (e.g. 112x112 or 224x224) so it embeds correctly.
+    - numeric mode (0.25/0.5/1.0/2.0/3.0): resize by that factor — used to
+      zoom in/out relative to the model input box size.
+    """
+    s = config.get("scale", 1.0)
+    if isinstance(s, str) and s == "free":
+        target = get_image_size()
+        if img.size != (target, target):
+            img = img.resize((target, target), Image.LANCZOS)
+        return img
+    scale = float(s)
     if scale != 1.0:
         img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
     return img

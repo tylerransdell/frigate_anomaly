@@ -16,7 +16,7 @@
   "sampling_interval": 60,
   "duration_filter": 0,
   "min_samples": 3,
-  "max_anomalies": 64,
+  "max_anomalies": 128,
   "anomaly_dedupe_threshold": 0.87,
   "mqtt_server": "",
   "mqtt_port": 1883,

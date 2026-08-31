@@ -121,6 +121,20 @@
   .zone-container img {
     max-width: 100%; height: auto; display: block;
   }
+  /* The image-size wrapper is positioned so the zone box can be drawn
+     with image-relative coordinates (so the box always lines up with the
+     image no matter how the container is laid out). */
+  .zone-image-wrap {
+    position: relative; display: block; line-height: 0;
+    /* Stop the browser from treating the image as a draggable handle so the
+       user can draw a rectangle (Free) or move the box (numeric) instead. */
+    -webkit-user-select: none; user-select: none;
+    -webkit-user-drag: none; touch-action: none;
+    overflow: hidden;
+  }
+  .zone-image-wrap img {
+    -webkit-user-drag: none; user-drag: none; pointer-events: auto;
+  }
   .zone-box {
     position: absolute; border: 2px dashed var(--green);
     background: rgba(0,255,136,0.15); pointer-events: none;
@@ -192,7 +206,7 @@
 <!-- ZONE SELECTION -->
 <h2> Detection Zone</h2>
 <div class="card">
-  <p class="hint">Click and drag to position a pre-sized box. Its size = model resolution × crop scale (set below).</p>
+  <p class="hint">Pick a Crop Scale below: numeric scales (0.25×–3.0×) drag a pre-sized box around; <b>Free</b> lets you draw any rectangle, which is resized to the model input (112 or 224).</p>
   <div id="zone-size-hint" class="hint" style="margin-top:6px; color: var(--yellow); font-style: normal; font-weight: bold;"></div>
   
   <button class="secondary" onclick="refreshSnapshot()" style="margin-bottom: 12px;">
@@ -200,8 +214,10 @@
   </button>
   
   <div class="zone-container" id="zone-container" style="min-height: 200px; background: #0f1a2e; border-radius: 8px; overflow: hidden;">
-    <img id="zone-snapshot" src="" alt="Camera snapshot" style="max-width: 100%; height: auto; display: block;">
-    <div class="zone-box" id="zone-box" style="display:none"></div>
+    <div class="zone-image-wrap" id="zone-image-wrap">
+      <img id="zone-snapshot" src="" alt="Camera snapshot" draggable="false" style="max-width: 100%; height: auto; display: block;">
+      <div class="zone-box" id="zone-box" style="display:none"></div>
+    </div>
   </div>
   
   <div class="row" style="margin-top:12px">
@@ -230,6 +246,7 @@
     <div class="knob active" data-val="1.0" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">1.0×</div>
     <div class="knob" data-val="2.0" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">2.0×</div>
     <div class="knob" data-val="3.0" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">3.0×</div>
+    <div class="knob" data-val="free" onclick="setKnob('scale-knob',this);updateZoneHint();scheduleSaveConfig();">Free</div>
   </div>
 
   <label>Similarity Method
@@ -452,24 +469,32 @@ async function refreshSnapshot() {
   // Set up handlers BEFORE setting src
   img.onload = () => {
     console.log("✅ Image loaded:", img.naturalWidth, "x", img.naturalHeight);
-    
-    // Clear container and add the loaded image
+
+    // Clear container and add the loaded image inside a position:relative
+    // wrapper so the zone box can be drawn in image-relative coordinates.
     container.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'zone-image-wrap';
+    wrap.id = 'zone-image-wrap';
+
     img.style.maxWidth = '100%';
     img.style.height = 'auto';
     img.style.display = 'block';
     img.style.borderRadius = '8px';
+    img.style.userSelect = 'none';
+    img.style.webkitUserSelect = 'none';
+    img.setAttribute('draggable', 'false');
     img.id = 'zone-snapshot';
-    
-    container.appendChild(img);
-    
-    // Re-add the zone box div
+
     const zoneBox = document.createElement('div');
     zoneBox.id = 'zone-box';
     zoneBox.className = 'zone-box';
     zoneBox.style.display = 'none';
-    container.appendChild(zoneBox);
-    
+
+    wrap.appendChild(img);
+    wrap.appendChild(zoneBox);
+    container.appendChild(wrap);
+
     console.log("Container size:", container.offsetWidth, "x", container.offsetHeight);
   };
   
@@ -494,21 +519,29 @@ const zoneContainer = document.getElementById('zone-container');
 
 function currentImg() { return zoneContainer.querySelector('#zone-snapshot'); }
 function currentBox() { return zoneContainer.querySelector('#zone-box'); }
+function currentWrap() { return zoneContainer.querySelector('#zone-image-wrap'); }
 
 function getModelRes() {
   const v = getKnob('model-size-knob');
   return v === 'small' ? 112 : 224;
 }
 function getScaleVal() {
-  return parseFloat(getKnob('scale-knob')) || 1.0;
+  const v = getKnob('scale-knob');
+  if (v === 'free') return 'free';
+  return parseFloat(v) || 1.0;
 }
+function isFreeMode() { return getKnob('scale-knob') === 'free'; }
 function getBoxSourceSize() {
+  if (isFreeMode()) return null;  // user-defined rect; no fixed size
   return Math.round(getModelRes() * getScaleVal());
 }
 
 function updateZoneHint() {
   const hint = document.getElementById('zone-size-hint');
-  if (hint) {
+  if (!hint) return;
+  if (isFreeMode()) {
+    hint.textContent = `Free: click and drag to draw any rectangle. The crop is resized to ${getModelRes()}×${getModelRes()} for the ${getKnob('model-size-knob')} model.`;
+  } else {
     hint.textContent = `Box size on image: ${getModelRes()}px (${getKnob('model-size-knob')}) × ${getScaleVal()}× = ${getBoxSourceSize()}px`;
   }
 }
@@ -527,28 +560,45 @@ function displayPxToSource(px, img) {
   };
 }
 
+let zoneMode = 'rect';   // 'rect' (numeric) or 'free' (user-drawn)
+let zoneStart = null;    // for free draw: {x, y} in display px
+
 zoneContainer.addEventListener('mousedown', e => {
+  // Stop the browser from doing its own drag-pan / image-drag / text-select
+  // so we can draw a rectangle (Free) or move the box (numeric) instead.
+  e.preventDefault();
   const img = currentImg();
   const box = currentBox();
   if (!img || !img.naturalWidth || !box) return;
 
   const rect = img.getBoundingClientRect();
-  const srcSize = getBoxSourceSize();
-  // Convert source box size into display pixels for the current image size.
-  const displayW = srcSize * (rect.width / img.naturalWidth);
-  const displayH = srcSize * (rect.height / img.naturalHeight);
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
 
-  // Place the box so its top-left follows the cursor, clamped inside the image.
-  let left = e.clientX - rect.left;
-  let top  = e.clientY - rect.top;
-  left = Math.max(0, Math.min(left, rect.width  - displayW));
-  top  = Math.max(0, Math.min(top,  rect.height - displayH));
-
-  box.style.display = 'block';
-  box.style.width  = displayW + 'px';
-  box.style.height = displayH + 'px';
-  box.style.left   = left + 'px';
-  box.style.top    = top + 'px';
+  if (isFreeMode()) {
+    // Free mode: draw a new rectangle from the cursor. Box becomes 0x0
+    // until mousemove stretches it out.
+    zoneMode = 'free';
+    zoneStart = { x: cx, y: cy };
+    box.style.display = 'block';
+    box.style.left = cx + 'px';
+    box.style.top  = cy + 'px';
+    box.style.width  = '0px';
+    box.style.height = '0px';
+  } else {
+    // Numeric mode: drag the fixed-size box around the image.
+    zoneMode = 'rect';
+    const srcSize = getBoxSourceSize();
+    const displayW = srcSize * (rect.width / img.naturalWidth);
+    const displayH = srcSize * (rect.height / img.naturalHeight);
+    let left = Math.max(0, Math.min(cx, rect.width  - displayW));
+    let top  = Math.max(0, Math.min(cy, rect.height - displayH));
+    box.style.display = 'block';
+    box.style.width  = displayW + 'px';
+    box.style.height = displayH + 'px';
+    box.style.left   = left + 'px';
+    box.style.top    = top + 'px';
+  }
   updateZoneHint();
   zoneDragging = true;
 });
@@ -558,16 +608,29 @@ zoneContainer.addEventListener('mousemove', e => {
   const img = currentImg();
   const box = currentBox();
   if (!img || !box) return;
-
   const rect = img.getBoundingClientRect();
-  const displayW = parseFloat(box.style.width);
-  const displayH = parseFloat(box.style.height);
-  let left = e.clientX - rect.left;
-  let top  = e.clientY - rect.top;
-  left = Math.max(0, Math.min(left, rect.width  - displayW));
-  top  = Math.max(0, Math.min(top,  rect.height - displayH));
-  box.style.left = left + 'px';
-  box.style.top  = top + 'px';
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+
+  if (zoneMode === 'free' && zoneStart) {
+    // Stretch the rect from zoneStart to the cursor.
+    const left  = Math.max(0, Math.min(zoneStart.x, cx));
+    const top   = Math.max(0, Math.min(zoneStart.y, cy));
+    const right = Math.max(0, Math.min(rect.width,  Math.max(zoneStart.x, cx)));
+    const bot   = Math.max(0, Math.min(rect.height, Math.max(zoneStart.y, cy)));
+    box.style.left   = left + 'px';
+    box.style.top    = top + 'px';
+    box.style.width  = (right - left) + 'px';
+    box.style.height = (bot - top) + 'px';
+  } else {
+    // Numeric mode: move the box.
+    const displayW = parseFloat(box.style.width);
+    const displayH = parseFloat(box.style.height);
+    const left = Math.max(0, Math.min(cx, rect.width  - displayW));
+    const top  = Math.max(0, Math.min(cy, rect.height - displayH));
+    box.style.left = left + 'px';
+    box.style.top  = top + 'px';
+  }
 });
 
 zoneContainer.addEventListener('mouseup', e => {
@@ -577,14 +640,33 @@ zoneContainer.addEventListener('mouseup', e => {
   const box = currentBox();
   if (!img || !box) return;
 
-  const src = displayPxToSource({
-    left: parseFloat(box.style.left),
-    top: parseFloat(box.style.top),
-    width: parseFloat(box.style.width),
-    height: parseFloat(box.style.height),
-  }, img);
+  let px;
+  if (zoneMode === 'free' && zoneStart) {
+    const rect = img.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const left  = Math.max(0, Math.min(zoneStart.x, cx));
+    const top   = Math.max(0, Math.min(zoneStart.y, cy));
+    const right = Math.max(0, Math.min(rect.width,  Math.max(zoneStart.x, cx)));
+    const bot   = Math.max(0, Math.min(rect.height, Math.max(zoneStart.y, cy)));
+    px = { left, top, width: right - left, height: bot - top };
+    zoneStart = null;
+  } else {
+    px = {
+      left: parseFloat(box.style.left),
+      top: parseFloat(box.style.top),
+      width: parseFloat(box.style.width),
+      height: parseFloat(box.style.height),
+    };
+  }
 
-  // Clamp to the image bounds and write the source-pixel zone.
+  // Free mode can produce a zero-width or zero-height rect if the user just
+  // tapped (no drag). Reject tiny rects as no-op so we don't corrupt the zone.
+  if (zoneMode === 'free' && (px.width < 4 || px.height < 4)) {
+    return;
+  }
+
+  const src = displayPxToSource(px, img);
   const maxX = Math.max(0, img.naturalWidth  - src.w);
   const maxY = Math.max(0, img.naturalHeight - src.h);
   document.getElementById('zone-x').value = Math.max(0, Math.min(src.x, maxX));
@@ -616,7 +698,7 @@ async function saveConfig() {
     mqtt_server: document.getElementById('mqtt-server').value,
     mqtt_port: parseInt(document.getElementById('mqtt-port').value),
     mqtt_topic: document.getElementById('mqtt-topic').value,
-    max_anomalies: 64,
+    max_anomalies: 128,
     anomaly_dedupe_threshold: parseFloat(document.getElementById('anomaly-dedupe').value),
   };
 
