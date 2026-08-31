@@ -31,6 +31,7 @@
   "min_samples": 3,
   "max_anomalies": 128,
   "anomaly_dedupe_threshold": 0.87,
+  "anomaly_dedupe_max_per_unique": 1,
   "mqtt_server": "",
   "mqtt_port": 1883,
   "mqtt_topic": "frigate/anomaly/alert"

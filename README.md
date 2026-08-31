@@ -30,7 +30,7 @@ No training, no labeling, no dataset prep. Just define “normal” once and let
 - Sample + duration filters improve accuracy and fit the whole thing to the real-world problem.
 - Auto-pull baselines from recordings: grab **1 now**, **24 (past 24 hours, hourly)**, or **48 (every 30 min)** at once. Only have 18 hours recorded? It pulls what it can — it doesn't choke.
 - Tracks a running **"lowest observed similarity"** to help tune (resets when the config changes).
-- Saves up to **128 unique anomalies** as a **global store** — not bound to any profile, zone, camera, or boundary. Deduped by a configurable similarity threshold against previously saved ones.
+- Saves up to **128 unique anomalies** as a **global store** — not bound to any profile, zone, camera, or boundary. Deduped by a configurable similarity threshold against previously saved ones, and a **max samples per unique anomaly** (default 1, 0 = 1) lets you keep a few frames from the *same* event when you want one to become a baseline later.
 - Easy to remove baselines or promote them from the live/history dashboards.
 - Runs the DINOv2 vision model through **OpenVINO only** (iGPU/CPU — no CUDA drama).
 - Saves **profiles** (baselines + settings) and loads them from a drop-down.

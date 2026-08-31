@@ -351,6 +351,12 @@
     </label>
     <input id="anomaly-dedupe" type="number" step="0.01" min="0" max="0.99" value="0.87" style="flex:1;">
   </div>
+  <div class="row" style="align-items:center;">
+    <label style="flex:2; margin:0;">Max samples per unique anomaly
+      <span class="hint">Keep this many samples from the same anomaly event (handy when a frame from that event might become a baseline later). 0 = 1.</span>
+    </label>
+    <input id="anomaly-dedupe-max" type="number" step="1" min="0" max="128" value="1" style="flex:1;">
+  </div>
   <div class="anomaly-grid" id="anomaly-grid">
     <p class="hint">No saved anomalies yet.</p>
   </div>
@@ -798,6 +804,7 @@ async function saveConfig() {
     mqtt_topic: document.getElementById('mqtt-topic').value,
     max_anomalies: 128,
     anomaly_dedupe_threshold: parseFloat(document.getElementById('anomaly-dedupe').value),
+    anomaly_dedupe_max_per_unique: Math.max(1, parseInt(document.getElementById('anomaly-dedupe-max').value) || 1),
   };
 
   if (saveStatus) {
@@ -1185,6 +1192,7 @@ pollDashboard();
       document.getElementById('mqtt-port').value = data.mqtt_port || 1883;
       document.getElementById('mqtt-topic').value = data.mqtt_topic || '';
       document.getElementById('anomaly-dedupe').value = data.anomaly_dedupe_threshold || 0.87;
+      document.getElementById('anomaly-dedupe-max').value = data.anomaly_dedupe_max_per_unique || 1;
       if (data.zone) {
         document.getElementById('zone-x').value = data.zone.x;
         document.getElementById('zone-y').value = data.zone.y;

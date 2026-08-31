@@ -127,6 +127,7 @@ DEFAULT_CONFIG = {
     "min_samples": 5,              # min anomalous samples to confirm; 0/null -> 1
     "max_anomalies": 128,           # at most this many saved anomalies are kept (recent first)
     "anomaly_dedupe_threshold": 0.87,  # skip saving a new anomaly if a saved one is more similar than this
+    "anomaly_dedupe_max_per_unique": 1,  # keep up to N samples from the same anomaly event; 0/null -> 1
     "mqtt_server": "",
     "mqtt_port": 1883,
     "mqtt_topic": "frigate/anomaly/alert",
@@ -758,16 +759,50 @@ def load_anomalies():
     log.info("Anomaly bank loaded: %d image(s)", len(files))
 
 
+def _cluster_size_around(bank: np.ndarray, idx: int, threshold: float) -> int:
+    """Size of the connected cluster containing row `idx` of `bank`.
+
+    Two saved anomalies belong to the same anomaly event when their cosine
+    similarity is at or above the dedupe threshold. The connection is
+    transitive, so one long event that slowly drifts still reads as a single
+    cluster (rather than as N fresh unique anomalies)."""
+    sims = np.dot(bank, bank.T) >= threshold
+    seen = {idx}
+    stack = [idx]
+    while stack:
+        node = stack.pop()
+        for nbr in np.nonzero(sims[node])[0].tolist():
+            if nbr not in seen:
+                seen.add(nbr)
+                stack.append(nbr)
+    return len(seen)
+
+
 def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray) -> bool:
-    """Persist a new anomaly unless it's a near-duplicate of a saved one
-    (similarity >= dedupe threshold). Trims to the newest MAX_ANOMALIES.
-    Returns True if saved, False if it was skipped as a duplicate."""
+    """Persist a new anomaly unless the saved store already covers it.
+
+    Two rules, both configurable:
+      - anomaly_dedupe_threshold: treat a new anomaly as the same event as an
+        already-saved one when it's closer than this to it.
+      - anomaly_dedupe_max_per_unique: even within one event, keep up to this
+        many samples (handy when a frame from that event might become a
+        baseline later). 0 or null -> 1, so 1 = one sample per unique anomaly
+        (the default); raising it keeps samples per event instead of a flood.
+    Trims to the newest MAX_ANOMALIES.
+    Returns True if saved, False if it was skipped as a duplicate/over-quota."""
     with anomaly_lock:
-        if anomaly_bank is not None and len(anomaly_bank) > 0:
+        bank = anomaly_bank
+        if bank is not None and len(bank) > 0:
             dedupe = float(config.get("anomaly_dedupe_threshold", 0.87) or 0.87)
-            best = float(np.max(np.dot(anomaly_bank, embedding)))
+            max_per_unique = max(1, int(config.get("anomaly_dedupe_max_per_unique", 1) or 1))
+            sims = np.dot(bank, embedding)
+            best_idx = int(np.argmax(sims))
+            best = float(sims[best_idx])
             if best >= dedupe:
-                return False
+                # Same event as an already-saved anomaly. Only keep it while
+                # this event still has room under its per-unique quota.
+                if _cluster_size_around(bank, best_idx, dedupe) >= max_per_unique:
+                    return False
         files = _anomaly_files()
         nums = []
         for p in files:
