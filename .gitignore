@@ -37,6 +37,9 @@ test_bulk_sampling.py
 *.jpg
 *.test
 notes*
+# Stale docs, live outside the repo
+overview.md
+install_with.md
 
 # Local config contains your camera name & Frigate IP — never share
 config.json
