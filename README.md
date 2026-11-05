@@ -88,6 +88,20 @@ Bare metal instead? `pip install -r requirements.txt && python3 server.py` — a
 
 ---
 
+## Migrating from the bare-metal install
+
+Stop the old server first (systemd unit, tmux, whatever runs it — it owns `:8080`), then move its state into the volume:
+
+```bash
+mkdir -p data
+mv config.json baselines anomalies profiles model_cache logs rtsp_schedule.json data/ 2>/dev/null
+docker compose up -d --build
+```
+
+`./data` is exactly the layout the container expects, so settings, baselines, saved anomalies (with their capture scores and timestamps) and the compiled model all carry over. The redirect is only there because `rtsp_schedule.json` may not exist yet.
+
+---
+
 ## A Photo
 
 ![dino.png](dino.png)
