@@ -79,36 +79,18 @@ docker compose up -d --build
 docker compose logs -f          # follow the detector
 ```
 
-Everything the app writes lives in `./data`, so rebuilds and upgrades never cost you your setup:
+`./data` holds everything the app writes — settings, baselines, anomalies, profiles, the compiled model cache and logs — so rebuilds and upgrades keep your setup. Needs an Intel GPU; the model runs through OpenVINO's GPU plugin.
 
-| Path | Holds |
-| :--- | :--- |
-| `./data/config.json` | all settings — camera, zone, thresholds, MQTT, RTSP URL |
-| `./data/baselines/` | the baseline library |
-| `./data/anomalies/` | saved anomaly store + `index.json` metadata |
-| `./data/profiles/` | saved profiles |
-| `./data/model_cache/` | the quantized OpenVINO IR (keeps restarts instant) |
-| `./data/logs/` | `server.log` (rotating) |
-| `./data/rtsp_schedule.json` | progress of an in-flight "next 24/48" capture plan |
+The compose file ships with `network_mode: host` — the container reaches Frigate, your cameras and MQTT by LAN address and serves the UI on `:8080` — and `privileged: true` for iGPU (`/dev/dri`) access. Both can be tightened with the commented `devices:` / `group_add:` / `ports:` / `user:` alternatives at the bottom of the file.
 
-The compose file ships with the blunt-but-working setup:
+Prefer to keep Frigate off the host network? Give both containers their own bridge network and talk to Frigate privately on its open port 5000:
 
-* `network_mode: host` — the container reaches Frigate, your RTSP cameras and the MQTT broker at their normal LAN addresses, and serves the UI on `:8080` with no port mapping.
-* `privileged: true` — passes the host iGPU (`/dev/dri`) through so OpenVINO can compile for the GPU.
+```bash
+docker network create dockernet
+docker network connect dockernet frigate
+```
 
-Advanced users can tighten both; the file carries commented alternatives for a least-privilege `devices:` / `group_add:` block, bridge networking with `ports:`, and `user: "1000:1000"` so `./data` stays owned by you.
-
-Notes:
-
-* Built on **Ubuntu 26.04 LTS** because it ships the current Intel graphics compute stack (`intel-opencl-icd` / `libze-intel-gpu1` 26.05 + `libze1`), which is what the OpenVINO GPU plugin needs on modern iGPUs. No Debian release carries that userspace, and bookworm's 22.43 can't even initialise a Meteor Lake iGPU — OpenVINO then quietly reports CPU-only. `ffmpeg` and Python 3.14 are in the image too.
-* The image contains **no configuration** — `config.json` is excluded on purpose, so camera names, LAN IPs and RTSP credentials are never baked into a layer. The app reads them from the volume at runtime.
-* `ffmpeg` and the Intel GPU userspace are already in the image; nothing extra to install on the host beyond the container runtime and a working kernel driver for the GPU.
-* Requires an Intel GPU (iGPU or Arc): the model is compiled for OpenVINO's `GPU` plugin with no CPU fallback.
-* First start with an empty `./data/model_cache` downloads DINOv2 via `torch.hub` and int8-quantizes it — a minute or two, needs internet. It is cached afterwards.
-* `DINO_DATA_DIR` (env, default `/data` in the image, the script dir on bare metal) is what makes the single-bind persistence work — that's the whole of the "config" the container needs.
-* `/etc/localtime` and `/etc/timezone` are mounted read-only so log lines and saved-anomaly timestamps use your local clock instead of UTC. Drop those two binds to stay on UTC.
-* If you already run the bare-metal systemd unit, stop and disable it first — both want port 8080:
-  `sudo systemctl disable --now dino.service`
+…then drop `network_mode: host` from this service in favour of `networks: [dockernet]` plus `ports: ["8080:8080"]`, and point the Frigate URL at `http://frigate:5000`.
 
 ---
 
