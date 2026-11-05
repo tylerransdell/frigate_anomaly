@@ -48,6 +48,9 @@ config.json
 # In-flight RTSP "next 24/48" capture plan progress (machine-specific runtime state)
 rtsp_schedule.json
 
+# Docker: all mutable state for the compose stack (config, captures, model cache)
+data/
+
 # OS / editor
 .DS_Store
 Thumbs.db

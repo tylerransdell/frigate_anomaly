@@ -1,0 +1,67 @@
+# Frigate Anomaly Detector — DINOv2/OpenVINO
+#
+#   mkdir -p data
+#   docker compose up -d --build
+#   open http://<host-ip>:8080
+#
+# Everything the app writes lives in ./data (config.json, baselines/,
+# anomalies/, profiles/, model_cache/, logs/, rtsp_schedule.json), so you can
+# rebuild or upgrade the container without losing your setup.
+services:
+  dino:
+    build:
+      context: .
+    image: dino-anomaly:0.0.5
+    container_name: dino
+    restart: unless-stopped
+
+    # Host networking: the container reaches Frigate, your RTSP cameras and the
+    # MQTT broker at their normal LAN addresses, and serves the UI on :8080 with
+    # no port mapping. Simplest thing that works; see the bottom for the
+    # isolation-friendly alternative.
+    network_mode: host
+
+    # Privileged: passes the host's iGPU (/dev/dri) through so OpenVINO can
+    # compile and run on the GPU. Advanced users: delete this and use the
+    # least-privilege `devices:` block at the bottom instead.
+    privileged: true
+
+    environment:
+      # Where the app keeps its mutable state (matches the volume below).
+      DINO_DATA_DIR: /data
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      # settings + captures + compiled model cache + logs, all in one bind.
+      - ./data:/data
+      # Keep log lines, anomaly timestamps and "last detection" in the host's
+      # timezone instead of UTC. Drop these to stay on UTC.
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
+    # Cold start downloads/quantizes the model and compiles it for the iGPU.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/config', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+    # ---------------------------------------------------------------------
+    # Least privilege instead of `privileged: true`
+    # ---------------------------------------------------------------------
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - video
+    #   - render
+    #
+    # Bridge networking instead of host networking (then drop
+    # network_mode: host above):
+    #
+    # ports:
+    #   - "8080:8080"
+    #
+    # Run as your own uid/gid so ./data isn't root-owned:
+    #
+    # user: "1000:1000"

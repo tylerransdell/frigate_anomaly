@@ -1,0 +1,28 @@
+# Keep the build context small and, more importantly, keep machine-specific
+# state out of the image: config.json holds camera names, LAN IPs, MQTT topics
+# and (for RTSP) credentials.
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.log
+logs
+model_cache
+baselines
+anomalies
+profiles
+data
+config.json
+config.example.json
+notes*
+*.md
+*.jpg
+*.png
+test_*.py
+front_test.jpg
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -171,7 +171,8 @@
 <body>
 
 <h1>⚠ Anomaly Detector — works with Frigate</h1>
-<p style="color:var(--muted);font-size:0.85em;">DINOv2-powered visual anomaly detection that works with Frigate NVR</p>
+<p style="color:var(--muted);font-size:0.85em;">DINOv2-powered visual anomaly detection that works with Frigate NVR
+  <span id="app-version" style="color:var(--green);opacity:0.7;"></span></p>
 
 <!-- ENGINE STATUS -->
 <div id="engine-status" class="stopped">● Engine Stopped</div>
@@ -1374,6 +1375,8 @@ pollDashboard();
     const res = await fetch('/api/config');
     const data = await res.json();
     if (data) {
+      const versionEl = document.getElementById('app-version');
+      if (versionEl) versionEl.textContent = data.version ? `· v${data.version}` : '';
       // Source selector first: cameraName() depends on which panel is active.
       const srcEl = document.querySelector(`#source-knob [data-val="${data.source_type || 'frigate'}"]`);
       if (srcEl) setKnob('source-knob', srcEl);

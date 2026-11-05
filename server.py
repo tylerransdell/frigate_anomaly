@@ -3,24 +3,31 @@
 Frigate Anomaly Detector - Full PWA Server
 ===========================================
 Serves a Progressive Web App for configuring and monitoring
-DINOv2-based visual anomaly detection on Frigate NVR cameras.
+DINOv2-based visual anomaly detection on Frigate NVR cameras (or on a camera
+grabbed directly over RTSP).
 
 Features:
   - PWA frontend with zone selection, model knobs, and live dashboard
   - DINOv2 ViT-S/14 via OpenVINO (iGPU optimized)
-  - Configurable sampling (interval or MQTT trigger)
-  - Duration filter with rapid re-sampling
-  - MQTT alert publishing (no auth)
-  - Minimum sample count for alert confirmation
+  - Frigate API or direct RTSP camera as the frame source
+  - Configurable sampling (interval) with sample/duration filters
+  - MQTT alert publishing (no auth) with an alert cooldown
+  - Saved-anomaly store with permanent capture scores + timestamps
 
 Run:
   python server.py                    # default port 8080
   python server.py --port 9000        # custom port 9000
 
   Open http://localhost:8080 in your browser
+
+Environment:
+  DINO_DATA_DIR   Where mutable state (config, baselines, anomalies, profiles,
+                  model_cache, logs, rtsp_schedule.json) is kept. Defaults to the
+                  script directory; the Docker image uses /data.
 """
 
 import json
+import os
 import time
 import threading
 import base64
@@ -43,11 +50,25 @@ from torchvision import transforms
 from flask import Flask, render_template, request, jsonify, send_file, Response
 import paho.mqtt.client as mqtt
 
+__version__ = "0.0.5"
+
+# ============================================================================
+# BASE / DATA DIRS
+# ============================================================================
+# Read-only application files (server.py, templates/, static/) live next to the
+# script. Everything the app WRITES — config.json, baselines, anomalies,
+# profiles, the compiled model cache, logs and the RTSP plan state — lives under
+# DATA_DIR. That defaults to the script's directory (bare-metal install), and
+# can be relocated with the DINO_DATA_DIR environment variable; the Docker image
+# sets it to /data so a single bind mount persists all of it.
+BASE_DIR = Path(__file__).parent
+DATA_DIR = Path(os.environ.get("DINO_DATA_DIR") or BASE_DIR).expanduser()
+
 # ============================================================================
 # LOGGING (console + rotating file so crashes/stalls leave a trace)
 # ============================================================================
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "server.log"
 
 _log_format = "%(asctime)s [%(levelname)s] %(message)s"
@@ -98,16 +119,15 @@ class _AccessLogFilter(logging.Filter):
 flask_logger.addFilter(_AccessLogFilter())
 
 # ============================================================================
-# PATHS
+# PATHS (mutable state — see DATA_DIR above)
 # ============================================================================
-BASE_DIR = Path(__file__).parent
-CONFIG_PATH = BASE_DIR / "config.json"
-BASELINE_DIR = BASE_DIR / "baselines"
-ANOMALIES_DIR = BASE_DIR / "anomalies"
-PROFILES_DIR = BASE_DIR / "profiles"
-MODEL_CACHE = BASE_DIR / "model_cache"
+CONFIG_PATH = DATA_DIR / "config.json"
+BASELINE_DIR = DATA_DIR / "baselines"
+ANOMALIES_DIR = DATA_DIR / "anomalies"
+PROFILES_DIR = DATA_DIR / "profiles"
+MODEL_CACHE = DATA_DIR / "model_cache"
 for _d in (BASELINE_DIR, ANOMALIES_DIR, PROFILES_DIR, MODEL_CACHE):
-    _d.mkdir(exist_ok=True)
+    _d.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
 # DEFAULT CONFIG
@@ -186,7 +206,7 @@ anomaly_index_lock = threading.RLock()
 
 # RTSP "next 24/48 images" baseline capture plan (persisted so a service
 # restart mid-plan doesn't silently drop it).
-RTSP_SCHEDULE_PATH = BASE_DIR / "rtsp_schedule.json"
+RTSP_SCHEDULE_PATH = DATA_DIR / "rtsp_schedule.json"
 rtsp_schedule_lock = threading.RLock()
 rtsp_schedule_stop = threading.Event()
 rtsp_schedule_state = {
@@ -1746,6 +1766,7 @@ def index():
 @app.route("/api/config", methods=["GET"])
 def get_config():
     return jsonify({**config, "engine_running": engine_running,
+                    "version": __version__,
                     "model_ready": compiled_model is not None,
                     "model_loading": model_loading,
                     "model_error": model_error})
@@ -2233,7 +2254,9 @@ if __name__ == "__main__":
     load_config()
     # threaded=True: serve request concurrently so a slow outbound call
     # (snapshot proxy / camera fetch / model load) never wedges the server.
-    log.info("Starting Frigate Anomaly Detector PWA on http://0.0.0.0:%d", args.port)
+    log.info("Starting Frigate Anomaly Detector PWA v%s on http://0.0.0.0:%d",
+             __version__, args.port)
+    log.info("Data directory: %s", DATA_DIR)
     # Pick up an RTSP capture plan that was running when the service stopped.
     resume_rtsp_schedule()
     maybe_autostart()
