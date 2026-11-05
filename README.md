@@ -106,7 +106,7 @@ docker compose up -d --build
 
 ![dino.png](dino.png)
 
-*Outdated — live dashboard & anomaly store do one-click baseline upgrade now. Still just as ugly.*
+*Live dashboard: every detection keeps its similarity score and timestamp, and any frame can be promoted to a baseline in one click.*
 
 ---
 
