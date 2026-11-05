@@ -55,31 +55,23 @@ Traditional classifiers break down when data is scarce or the environment introd
 
 ---
 
-## Quickstart (4 Steps)
-```
-git clone https://github.com/tylerransdell/frigate_anomaly && cd frigate_anomaly
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python3 server.py                # web UI at http://<host-ip>:8080
-# or, if port 8080 is in use:
-python3 server.py --port 9090
-```
-Note: On the first run, the script compiles the OpenVINO IR model and caches it under model_cache/. This takes a minute or two; subsequent launches are instantaneous.
-
-RTSP mode additionally needs `ffmpeg` on the host (`sudo apt install ffmpeg`). Frigate mode does not.
-
----
-
-## Docker (compose included)
+## Quickstart
 
 ```bash
+git clone https://github.com/tylerransdell/frigate_anomaly && cd frigate_anomaly
 mkdir -p data
 docker compose up -d --build
 # UI at http://<host-ip>:8080
 docker compose logs -f          # follow the detector
 ```
 
-`./data` holds everything the app writes — settings, baselines, anomalies, profiles, the compiled model cache and logs — so rebuilds and upgrades keep your setup. Needs an Intel GPU; the model runs through OpenVINO's GPU plugin.
+First start builds the image and int8-quantizes DINOv2 (a minute or two, needs internet); after that it is instant. Needs an Intel GPU — the model runs through OpenVINO's GPU plugin, with no CPU fallback.
+
+---
+
+## Docker: storage & networking
+
+`./data` holds everything the app writes — settings, baselines, anomalies, profiles, the compiled model cache and logs — so rebuilds and upgrades keep your setup.
 
 The compose file ships with `network_mode: host` — the container reaches Frigate, your cameras and MQTT by LAN address and serves the UI on `:8080` — and `privileged: true` for iGPU (`/dev/dri`) access. Both can be tightened with the commented `devices:` / `group_add:` / `ports:` / `user:` alternatives at the bottom of the file.
 
@@ -91,6 +83,8 @@ docker network connect dockernet frigate
 ```
 
 …then drop `network_mode: host` from this service in favour of `networks: [dockernet]` plus `ports: ["8080:8080"]`, and point the Frigate URL at `http://frigate:5000`.
+
+Bare metal instead? `pip install -r requirements.txt && python3 server.py` — add `ffmpeg` for RTSP sources and the Intel GPU runtime on the host, both of which the image bundles.
 
 ---
 
