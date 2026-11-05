@@ -1,10 +1,10 @@
-# Anomaly Detection for Frigate
+# Anomaly Detection for Frigate (or just RTSP)
 
 **version 0.1.0 — proof of concept.** Don't get attached.
 
-An ugly yet powerful tool for zero-shot anomaly detection on Frigate camera feeds — or on any camera over RTSP.
+An ugly yet powerful tool for zero-shot anomaly detection on Frigate camera feeds — or straight off any RTSP camera, no Frigate required.
 
-This is a pragmatic utility bringing Zero-Shot Anomaly Detection directly to local Frigate streams using OpenVINO and Intel iGPUs. Define "normal" structurally and let the model handle the rest.
+This is a pragmatic utility bringing Zero-Shot Anomaly Detection to local camera streams — through Frigate, or straight off the camera over RTSP — using OpenVINO and Intel iGPUs. Define "normal" structurally and let the model handle the rest.
 
 ---
 
@@ -26,7 +26,7 @@ Traditional classifiers break down when data is scarce or the environment introd
 ## What It Does
 
 * Frigate API Integration: Pulls snapshots directly from your local Frigate server (no auth, local LAN use only).
-* Direct RTSP Cameras: No Frigate handy? Select the RTSP source, paste a stream URL, and grab full-resolution frames straight off the camera (uses ffmpeg, credentials stay on the server).
+* Direct RTSP Cameras: Frigate is optional. If anomaly alerts are all you want, routing the camera through Frigate is wasted CPU, disk and hardware wear — point this at the RTSP stream instead and it pulls full-resolution frames itself (ffmpeg; credentials stay on the server).
 * Flexible UI Cropping & Zones: Draw any rectangle for a region or use fixed scaling. The server automatically handles image resizing to fit the model input.
 * Robust k-NN Scoring: Score against your single nearest neighbor (k=1) or the mean of the top 3 (k=3) across up to 64 baseline images.
 * Automated Batch Baselines: From Frigate, one-button pull of the **previous** 24 (hourly) or 48 (every 30 mins) snapshots out of its recordings — graceful when recordings are < 24hr. From an RTSP camera, start a stoppable background plan that captures the **next** 24 (hourly) or 48 (every 30 mins) images going forward.
