@@ -1,4 +1,4 @@
-const CACHE_NAME = 'frigate-anomaly-v1';
+const CACHE_NAME = 'frigate-anomaly-v2';
 const ASSETS = ['/', '/static/manifest.json'];
 
 self.addEventListener('install', e => {

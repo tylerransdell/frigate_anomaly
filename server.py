@@ -50,7 +50,7 @@ from torchvision import transforms
 from flask import Flask, render_template, request, jsonify, send_file, Response
 import paho.mqtt.client as mqtt
 
-__version__ = "0.0.5"
+__version__ = "0.1.0"
 
 # ============================================================================
 # BASE / DATA DIRS

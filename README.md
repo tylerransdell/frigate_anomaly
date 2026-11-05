@@ -1,6 +1,6 @@
 # Anomaly Detection for Frigate
 
-**version 0.0.5 — proof of concept.** Don't get attached.
+**version 0.1.0 — proof of concept.** Don't get attached.
 
 An ugly yet powerful tool for zero-shot anomaly detection on Frigate camera feeds — or on any camera over RTSP.
 
