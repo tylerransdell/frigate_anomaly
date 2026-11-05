@@ -45,6 +45,7 @@
   button:active { transform: scale(0.98); }
   button.danger { background: var(--red); color: #fff; }
   button.secondary { background: var(--accent); color: var(--text); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .hint { color: var(--muted); font-size: 0.75em; font-style: italic; margin-top: 2px; display: block;}
 
@@ -103,6 +104,10 @@
   }
   .anomaly-item img { width: 100%; border-radius: 4px; display: block; }
   .anomaly-item .a-label { font-size: 0.75em; margin: 6px 0; color: var(--muted); }
+  .anomaly-item .a-meta {
+    font-size: 0.68em; color: var(--muted); line-height: 1.35; margin-bottom: 4px;
+  }
+  .anomaly-item .a-meta b { color: var(--yellow); font-weight: bold; }
   .anomaly-item .a-btn {
     width: 100%; margin-top: 4px; padding: 4px; font-size: 0.7em;
   }
@@ -171,36 +176,67 @@
 <!-- ENGINE STATUS -->
 <div id="engine-status" class="stopped">● Engine Stopped</div>
 
-<!-- FRIGATE CONNECTION -->
-<h1>📷 Frigate Connection</h1>
+<!-- CAMERA CONNECTION -->
+<h1>📷 Camera Connection</h1>
 <div class="card">
-    <label>Frigate URL
-        <span class="hint">e.g., http://192.168.1.100:5000 (no trailing slash)</span>
+  <label>Source
+    <span class="hint">Frigate = pull snapshots and recordings from Frigate's API. RTSP = grab frames straight off a camera (needs ffmpeg on this host, no Frigate required).</span>
+  </label>
+  <div class="knob-group" id="source-knob">
+    <div class="knob active" data-val="frigate" onclick="setKnob('source-knob',this);onSourceChanged();">Frigate</div>
+    <div class="knob" data-val="rtsp" onclick="setKnob('source-knob',this);onSourceChanged();">RTSP Camera</div>
+  </div>
+
+  <!-- FRIGATE -->
+  <div id="frigate-block">
+    <label style="margin-top: 12px;">Frigate URL
+      <span class="hint">e.g., http://192.168.1.100:5000 (no trailing slash)</span>
     </label>
     <input type="text" id="frigate_url" value="http://192.168.1.100:5000"
            placeholder="http://192.168.1.100:5000" style="width: 100%;">
-    
+
     <button class="btn btn-secondary" onclick="loadCameras()" style="margin-top: 8px; width: 100%;">
-        🔍 Fetch Cameras
+      🔍 Fetch Cameras
     </button>
 
     <label style="margin-top: 12px;">Camera Name
-        <span class="hint">Select a camera from the dropdown</span>
+      <span class="hint">Select a camera from the dropdown</span>
     </label>
     <select id="camera_name" style="width: 100%;" onchange="onCameraChanged()">
-        <option value="">-- Select a camera --</option>
+      <option value="">-- Select a camera --</option>
     </select>
 
     <div id="camera-status" class="hint" style="margin-top: 8px; color: #888;">
-        Click "Fetch Cameras" to load available cameras from Frigate
+      Click "Fetch Cameras" to load available cameras from Frigate
     </div>
-    
-    <button onclick="saveConfig()" style="margin-top: 16px; width: 100%;">
-        💾 Save Settings
+  </div>
+
+  <!-- RTSP -->
+  <div id="rtsp-block" style="display: none;">
+    <label style="margin-top: 12px;">RTSP URL
+      <span class="hint">rtsp://user:pass@192.168.1.50:554/stream1 — credentials stay on this server; they are never sent back to the browser or written to the log.</span>
+    </label>
+    <input type="text" id="rtsp_url" placeholder="rtsp://user:pass@192.168.1.50:554/Streaming/Channels/101">
+
+    <label style="margin-top: 12px;">Camera Name
+      <span class="hint">Any label you like — it keys this camera's zone, baselines and anomaly tags (same role as Frigate's camera name).</span>
+    </label>
+    <input type="text" id="rtsp_camera_name" placeholder="front-camera" onchange="onCameraChanged()">
+
+    <button class="secondary" onclick="testRtsp()" style="margin-top: 12px; width: 100%;">
+      🎬 Grab Test Frame
     </button>
-    <div id="save-status" class="hint" style="margin-top: 8px; color: #888;">
-        Save your camera, detection zone, and all settings so they persist across restarts.
+    <div id="rtsp-status" class="hint" style="margin-top: 8px; color: #888;">
+      Point this at the camera's main stream so frames are full resolution.
     </div>
+  </div>
+
+  <button onclick="saveConfig()" style="margin-top: 16px; width: 100%;">
+    💾 Save Settings
+  </button>
+  <div id="save-status" class="hint" style="margin-top: 8px; color: #888;">
+    Save your camera, detection zone, and all settings so they persist across restarts.
+  </div>
 </div>
 
 <!-- ZONE SELECTION -->
@@ -303,20 +339,40 @@
     <span class="hint">e.g. frigate/anomaly/alert</span>
   </label>
   <input id="mqtt-topic" type="text" placeholder="frigate/anomaly/alert">
+
+  <label>Alert Cooldown (seconds)
+    <span class="hint">Send one alert, then stay quiet this long. 60 = 1 min, 3600 = 1 hour, 86400 = 1 day. 0 = alert on every anomaly. Escalation belongs in your alerting system, not here.</span>
+  </label>
+  <input id="mqtt-alert-cooldown" type="number" min="0" step="1" value="60">
 </div>
 
 <!-- BASELINE LIBRARY -->
 <h2>📚 Baseline Library</h2>
 <div class="card">
-  <p class="hint">Save up to 64 normal snapshots here. Each photo's confidence = similarity to its nearest neighbor — too close means a duplicate. Add a one-touch 24-hour baseline set from recordings, then trim what you don't need.</p>
+  <p class="hint">Save up to 64 normal snapshots here. Each photo's confidence = similarity to its nearest neighbor — too close means a duplicate.</p>
   <div class="row" style="align-items:center;">
     <button onclick="captureBaseline()">📷 Capture Zone as Baseline</button>
     <button class="secondary" onclick="loadBaselines()">↻ Refresh</button>
   </div>
-  <div class="row" style="align-items:center; margin-top:8px;">
-    <button class="secondary" onclick="bulkSample(60)">⏱ 24 samples (hourly)</button>
-    <button class="secondary" onclick="bulkSample(30)">⏱ 48 samples (30 min)</button>
+
+  <label style="margin-top:14px;">Frigate recordings — <b>previous</b> 24h
+    <span class="hint">Pulls historical snapshots out of Frigate's recordings. Frigate sources only.</span>
+  </label>
+  <div class="row" id="frigate-bulk-buttons" style="align-items:center;">
+    <button class="secondary" onclick="bulkSample(60)">⏱ Previous 24 (hourly)</button>
+    <button class="secondary" onclick="bulkSample(30)">⏱ Previous 48 (30 min)</button>
   </div>
+
+  <label style="margin-top:14px;">RTSP camera — <b>next</b> 24h
+    <span class="hint">Captures going forward: one frame every hour (24 images) or every 30 min (48 images), in the background. Stop it any time; saved frames stay saved.</span>
+  </label>
+  <div class="row" id="rtsp-bulk-buttons" style="align-items:center;">
+    <button class="secondary" onclick="startRtspSchedule(60)">▶ Next 24 (hourly)</button>
+    <button class="secondary" onclick="startRtspSchedule(30)">▶ Next 48 (30 min)</button>
+    <button class="danger" id="rtsp-schedule-stop" onclick="stopRtspSchedule()" disabled>■ Stop</button>
+  </div>
+  <div class="hint" id="rtsp-schedule-status" style="margin-top:6px;color:var(--yellow);"></div>
+
   <div class="hint" id="bulk-status" style="margin-top:6px;color:var(--yellow);"></div>
   <div class="hint" id="baseline-count" style="margin-top:6px;color:var(--yellow);"></div>
   <div class="baseline-grid" id="baseline-grid">
@@ -344,7 +400,7 @@
 <!-- ANOMALY DASHBOARD -->
 <h2>🚨 Saved Anomalies</h2>
 <div class="card">
-  <p class="hint">Recent anomalies persisted to disk (deduped). Promote one to a baseline or remove it.</p>
+  <p class="hint">Recent anomalies persisted to disk (deduped). Each card shows the capture date/time, the score it got against the baselines <b>when it was captured</b> (permanent — later baseline edits don't change it), and its similarity to the other saved anomalies. Promote one to a baseline or remove it.</p>
   <div class="row" style="align-items:center;">
     <label style="flex:2; margin:0;">Dedupe threshold
       <span class="hint">Skip saving a new anomaly if it's closer than this to a saved one.</span>
@@ -387,6 +443,59 @@ if ('serviceWorker' in navigator) {
 // State
 let config = {};
 let zoneDragging = false;
+let lastRtspSchedule = null;   // last /api/baseline/list rtsp_schedule payload
+
+// ---- Camera source helpers ------------------------------------------------
+// One switch drives everything: which connection panel is visible, which frame
+// endpoint the zone editor pulls from, and which camera name is persisted.
+function sourceType() { return getKnob('source-knob') || 'frigate'; }
+function isRtsp() { return sourceType() === 'rtsp'; }
+function cameraName() {
+  return isRtsp()
+    ? document.getElementById('rtsp_camera_name').value.trim()
+    : document.getElementById('camera_name').value;
+}
+function updateSourceVisibility() {
+  const rtsp = isRtsp();
+  document.getElementById('frigate-block').style.display = rtsp ? 'none' : 'block';
+  document.getElementById('rtsp-block').style.display = rtsp ? 'block' : 'none';
+  updateSourceButtons();
+}
+// Picking a source switches scenes, so the on-screen zone belongs to a camera
+// that is no longer active: clear it, persist, and let the server restore
+// whatever zone this camera name owns (or clear it if it has none).
+function onSourceChanged() {
+  updateSourceVisibility();
+  onCameraChanged();
+}
+async function testRtsp() {
+  const statusEl = document.getElementById('rtsp-status');
+  const rtspUrl = document.getElementById('rtsp_url').value.trim();
+  if (!rtspUrl) {
+    statusEl.textContent = 'Enter an RTSP URL first.';
+    statusEl.style.color = '#ef5350';
+    return;
+  }
+  statusEl.textContent = '⏳ Asking the camera for a frame...';
+  statusEl.style.color = '#4fc3f7';
+  try {
+    const res = await fetch('/api/rtsp/test', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ rtsp_url: rtspUrl })
+    });
+    const d = await res.json();
+    if (res.ok && d.status === 'ok') {
+      statusEl.textContent = `✓ Frame ${d.width}×${d.height} in ${d.latency_ms} ms`;
+      statusEl.style.color = '#4caf50';
+    } else {
+      statusEl.textContent = '✗ ' + (d.error || ('HTTP ' + res.status));
+      statusEl.style.color = '#ef5350';
+    }
+  } catch(e) {
+    statusEl.textContent = '✗ ' + e.message;
+    statusEl.style.color = '#ef5350';
+  }
+}
 
 // Knob helper
 function setKnob(groupId, el) {
@@ -458,8 +567,8 @@ async function loadCameras() {
 // server to swap to this camera's saved zone (or clear if none), then read
 // back whatever it settled on and redraw it on the fresh snapshot.
 async function onCameraChanged() {
-  const statusEl = document.getElementById('camera-status');
-  const cam = document.getElementById('camera_name').value;
+  const statusEl = document.getElementById(isRtsp() ? 'rtsp-status' : 'camera-status');
+  const cam = cameraName();
 
   // Clear the stale on-screen zone box + coordinate fields immediately.
   const box = document.getElementById('zone-box');
@@ -532,24 +641,31 @@ function drawSavedZoneOverlay(img) {
 
 
 
-// Refresh snapshot for zone drawing
+// Refresh the shot the zone is drawn on. Always the FULL frame (uncropped) of
+// whichever source is selected: Frigate's latest.jpg, or one live RTSP grab.
 async function refreshSnapshot() {
   console.log("📸 refreshSnapshot triggered");
-  
-  const url = document.getElementById('frigate_url').value.trim();
-  const cam = document.getElementById('camera_name').value.trim();
-  
-  console.log("URL:", url, "Camera:", cam);
-  
-  if (!url || !cam) {
-    alert('Set Frigate URL and camera first');
-    return;
+
+  const cam = cameraName();
+  let proxyUrl;
+
+  if (isRtsp()) {
+    const rtspUrl = document.getElementById('rtsp_url').value.trim();
+    if (!rtspUrl) {
+      alert('Set the RTSP URL first');
+      return;
+    }
+    proxyUrl = `/api/snapshot?source=rtsp&rtsp_url=${encodeURIComponent(rtspUrl)}&t=${Date.now()}`;
+  } else {
+    const url = document.getElementById('frigate_url').value.trim();
+    if (!url || !cam) {
+      alert('Set Frigate URL and camera first');
+      return;
+    }
+    proxyUrl = `/api/snapshot?source=frigate&frigate_url=${encodeURIComponent(url)}&camera_name=${encodeURIComponent(cam)}&t=${Date.now()}`;
   }
-  
+
   const container = document.getElementById('zone-container');
-  
-  // Build the proxy URL
-  const proxyUrl = `/api/snapshot?frigate_url=${encodeURIComponent(url)}&camera_name=${encodeURIComponent(cam)}&t=${Date.now()}`;
   console.log("Setting image src to:", proxyUrl);
   
   // Create a NEW image element
@@ -777,8 +893,10 @@ zoneContainer.addEventListener('mouseup', e => {
 async function saveConfig() {
   const saveStatus = document.getElementById('save-status');
   config = {
+    source_type: sourceType(),
     frigate_url: document.getElementById('frigate_url').value,
-    camera: document.getElementById('camera_name').value,
+    rtsp_url: document.getElementById('rtsp_url').value.trim(),
+    camera: cameraName(),
     zone: {
       x: parseInt(document.getElementById('zone-x').value),
       y: parseInt(document.getElementById('zone-y').value),
@@ -802,6 +920,7 @@ async function saveConfig() {
     mqtt_server: document.getElementById('mqtt-server').value,
     mqtt_port: parseInt(document.getElementById('mqtt-port').value),
     mqtt_topic: document.getElementById('mqtt-topic').value,
+    mqtt_alert_cooldown: Math.max(0, parseInt(document.getElementById('mqtt-alert-cooldown').value) || 0),
     max_anomalies: 128,
     anomaly_dedupe_threshold: parseFloat(document.getElementById('anomaly-dedupe').value),
     anomaly_dedupe_max_per_unique: Math.max(1, parseInt(document.getElementById('anomaly-dedupe-max').value) || 1),
@@ -820,9 +939,14 @@ async function saveConfig() {
     const data = await res.json();
     if (res.ok) {
       if (saveStatus) {
-        const savedAt = new Date().toLocaleTimeString();
-        saveStatus.textContent = `✓ Saved at ${savedAt} — camera "${config.camera || '(none)'}" and zone (${config.zone.x}, ${config.zone.y}, ${config.zone.w}x${config.zone.h}) persisted.`;
-        saveStatus.style.color = '#4caf50';
+        if (data.warning) {
+          saveStatus.textContent = `⚠ ${data.warning}`;
+          saveStatus.style.color = '#ffa502';
+        } else {
+          const savedAt = new Date().toLocaleTimeString();
+          saveStatus.textContent = `✓ Saved at ${savedAt} — camera "${config.camera || '(none)'}" and zone (${config.zone.x}, ${config.zone.y}, ${config.zone.w}x${config.zone.h}) persisted.`;
+          saveStatus.style.color = '#4caf50';
+        }
       }
     } else {
       if (saveStatus) {
@@ -862,8 +986,9 @@ async function loadBaselines() {
   try {
     const res = await fetch('/api/baseline/list');
     const data = await res.json();
+    renderRtspSchedule(data.rtsp_schedule);
     countEl.textContent =
-      `${data.count}/${data.max} baselines — confidence = similarity to nearest neighbor (too close = duplicate candidate)`;
+      `${data.count}/${data.max} baselines (${data.source === 'rtsp' ? 'RTSP' : 'Frigate'} source) — confidence = similarity to nearest neighbor (too close = duplicate candidate)`;
     if (!data.baselines.length) {
       grid.innerHTML = '<p class="hint">No baselines yet. Capture the zone or add from a live detection.</p>';
       return;
@@ -906,6 +1031,96 @@ async function loadBaselines() {
 setInterval(loadBaselines, 5000);
 loadBaselines();
 
+// ---- RTSP "next 24/48" capture plan --------------------------------------
+// State is polled from /api/baseline/list, so the progress line keeps updating
+// without a second timer.
+function updateSourceButtons(st) {
+  if (st !== undefined) lastRtspSchedule = st;
+  const sched = lastRtspSchedule || {};
+  const active = !!sched.active;
+  const rtsp = isRtsp();
+  document.querySelectorAll('#frigate-bulk-buttons button').forEach(b => {
+    b.disabled = rtsp;
+  });
+  document.querySelectorAll('#rtsp-bulk-buttons button').forEach(b => {
+    // Stop is only live while a plan is running; the two start buttons need an
+    // RTSP source and no plan already in flight.
+    if (b.id === 'rtsp-schedule-stop') b.disabled = !active;
+    else b.disabled = !rtsp || active;
+  });
+}
+
+function renderRtspSchedule(st) {
+  updateSourceButtons(st);
+  const el = document.getElementById('rtsp-schedule-status');
+  if (!el) return;
+  if (!st) { el.textContent = ''; return; }
+  const done = (st.captured || 0) + (st.failed || 0);
+  if (st.active) {
+    const next = st.next_at ? new Date(st.next_at).toLocaleTimeString() : 'now';
+    el.textContent = `⏳ Capture plan running: ${st.captured}/${st.total} saved`
+      + (st.failed ? `, ${st.failed} failed` : '')
+      + ` — next frame ${next} (every ${st.minutes} min)`;
+    el.style.color = '#4fc3f7';
+  } else if (st.stopped && st.total) {
+    el.textContent = `■ Stopped after ${st.captured}/${st.total} image(s)`
+      + (st.last_error ? ` — last error: ${st.last_error}` : '');
+    el.style.color = '#ffa502';
+  } else if (st.total && done >= st.total) {
+    el.textContent = `✓ Capture plan finished: ${st.captured}/${st.total} added`
+      + (st.failed ? `, ${st.failed} failed` : '');
+    el.style.color = '#4caf50';
+  } else {
+    el.textContent = st.last_error ? `Last error: ${st.last_error}` : '';
+    el.style.color = '#ffa502';
+  }
+}
+
+async function startRtspSchedule(minutes) {
+  const el = document.getElementById('rtsp-schedule-status');
+  // Persist the RTSP URL / camera name / zone first — the server captures with
+  // exactly the settings that are saved.
+  await saveConfig();
+  if (el) {
+    el.textContent = `⏳ Starting capture plan (every ${minutes} min for 24h)...`;
+    el.style.color = '#4fc3f7';
+  }
+  try {
+    const res = await fetch('/api/baseline/rtsp/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ minutes })
+    });
+    const d = await res.json();
+    if (d.ok) {
+      if (el) {
+        el.textContent = '⏳ ' + d.message;
+        el.style.color = '#4fc3f7';
+      }
+      loadBaselines();
+    } else if (el) {
+      el.textContent = '✗ ' + (d.error || 'Failed to start');
+      el.style.color = '#ef5350';
+    }
+  } catch(e) {
+    if (el) { el.textContent = '✗ ' + e.message; el.style.color = '#ef5350'; }
+  }
+}
+
+async function stopRtspSchedule() {
+  const el = document.getElementById('rtsp-schedule-status');
+  try {
+    const res = await fetch('/api/baseline/rtsp/stop', { method: 'POST' });
+    const d = await res.json();
+    if (el) {
+      el.textContent = d.stopped
+        ? `■ Stopping after ${d.captured}/${d.total} image(s)...`
+        : 'No capture plan is running.';
+      el.style.color = '#ffa502';
+    }
+  } catch(e) {}
+  loadBaselines();
+}
+
 // One-touch 24h baseline set
 async function bulkSample(minutes) {
   const statusEl = document.getElementById('bulk-status');
@@ -947,11 +1162,24 @@ async function loadAnomalies() {
       return;
     }
     grid.innerHTML = data.anomalies.map(a => {
-      const conf = (a.confidence !== null && a.confidence !== undefined)
-        ? Math.round(a.confidence) + '%' : '—';
+      // Two different numbers on purpose:
+      //  store sim    = similarity to the nearest OTHER saved anomaly (live)
+      //  original sim = score vs the baselines when captured (permanent)
+      const hasStore = (a.store_sim !== null && a.store_sim !== undefined);
+      const storeTxt = hasStore ? Math.round(a.store_sim * 100) + '%' : '—';
+      const hasOrig = (a.original_sim !== null && a.original_sim !== undefined);
+      let origTxt = 'unknown (pre-dates scoring)';
+      if (hasOrig) {
+        origTxt = Number(a.original_sim).toFixed(4);
+        if (a.threshold_at_capture !== null && a.threshold_at_capture !== undefined) {
+          origTxt += ` (thr ${Number(a.threshold_at_capture).toFixed(2)})`;
+        }
+      }
+      const when = a.created_at ? a.created_at.replace('T', ' ') : 'unknown time';
       return `<div class="anomaly-item">
         <img src="${a.image_url}?t=${Date.now()}" alt="anomaly ${a.index}">
-        <div class="a-label"><b>#${a.index}</b> · sim ${conf}</div>
+        <div class="a-label"><b>#${a.index}</b> · store sim ${storeTxt}</div>
+        <div class="a-meta">orig sim <b>${origTxt}</b><br>${when}${a.camera ? '<br>' + a.camera : ''}</div>
         <button class="secondary a-btn" data-index="${a.index}">+ Add as baseline</button>
         <button class="danger a-btn" data-index="${a.index}">🗑 Remove</button>
       </div>`;
@@ -1145,8 +1373,16 @@ pollDashboard();
   try {
     const res = await fetch('/api/config');
     const data = await res.json();
-    if (data.frigate_url) {
-      document.getElementById('frigate_url').value = data.frigate_url;
+    if (data) {
+      // Source selector first: cameraName() depends on which panel is active.
+      const srcEl = document.querySelector(`#source-knob [data-val="${data.source_type || 'frigate'}"]`);
+      if (srcEl) setKnob('source-knob', srcEl);
+      document.getElementById('rtsp_url').value = data.rtsp_url || '';
+      document.getElementById('rtsp_camera_name').value =
+        (data.source_type === 'rtsp') ? (data.camera || '') : '';
+      updateSourceVisibility();
+
+      document.getElementById('frigate_url').value = data.frigate_url || '';
       // Ensure the saved camera appears as a selectable option
       const camSelect = document.getElementById('camera_name');
       if (data.camera) {
@@ -1191,6 +1427,9 @@ pollDashboard();
       document.getElementById('mqtt-server').value = data.mqtt_server || '';
       document.getElementById('mqtt-port').value = data.mqtt_port || 1883;
       document.getElementById('mqtt-topic').value = data.mqtt_topic || '';
+      document.getElementById('mqtt-alert-cooldown').value =
+        (data.mqtt_alert_cooldown !== undefined && data.mqtt_alert_cooldown !== null)
+          ? data.mqtt_alert_cooldown : 60;
       document.getElementById('anomaly-dedupe').value = data.anomaly_dedupe_threshold || 0.87;
       document.getElementById('anomaly-dedupe-max').value = data.anomaly_dedupe_max_per_unique || 1;
       if (data.zone) {
@@ -1205,6 +1444,7 @@ pollDashboard();
       }
       updateEngineStatus(data.engine_running);
       updateModelStatus(data);
+      updateSourceButtons();
     }
   } catch(e) {}
 })();

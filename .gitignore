@@ -45,6 +45,9 @@ install_with.md
 config.json
 # (commit the sanitized template instead — config.example.json stays tracked)
 
+# In-flight RTSP "next 24/48" capture plan progress (machine-specific runtime state)
+rtsp_schedule.json
+
 # OS / editor
 .DS_Store
 Thumbs.db

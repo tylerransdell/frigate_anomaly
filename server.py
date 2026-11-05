@@ -37,6 +37,7 @@ import numpy as np
 import openvino as ov
 import torch
 import shutil
+import subprocess
 from PIL import Image
 from torchvision import transforms
 from flask import Flask, render_template, request, jsonify, send_file, Response
@@ -112,7 +113,9 @@ for _d in (BASELINE_DIR, ANOMALIES_DIR, PROFILES_DIR, MODEL_CACHE):
 # DEFAULT CONFIG
 # ============================================================================
 DEFAULT_CONFIG = {
+    "source_type": "frigate",      # "frigate" (its API) or "rtsp" (grab the camera directly)
     "frigate_url": "http://192.168.1.100:5000",
+    "rtsp_url": "",                # rtsp://user:pass@host:554/path (only used when source_type=rtsp)
     "camera": "",
     "zone": {"x": 0, "y": 0, "w": 224, "h": 224},   # absolute source pixels (NOT normalized)
     "zone_units": "pixels",
@@ -131,6 +134,7 @@ DEFAULT_CONFIG = {
     "mqtt_server": "",
     "mqtt_port": 1883,
     "mqtt_topic": "frigate/anomaly/alert",
+    "mqtt_alert_cooldown": 60,      # seconds between alert publishes; 0 = alert on every anomaly
     # Per-camera detection zones. Each entry is that camera's zone drawn on a
     # snapshot of THAT camera at THAT camera's resolution:
     #     "zones": {
@@ -152,6 +156,11 @@ engine_running = False
 engine_thread = None
 mqtt_client = None
 
+# MQTT alert cooldown: one alert goes out, then publishes stay quiet for
+# config["mqtt_alert_cooldown"] seconds (0 disables the throttle).
+_last_alert_at = 0.0
+alert_lock = threading.Lock()
+
 # Model state
 compiled_model = None
 loaded_model_size = None      # model_size string ("small"/"half") holds compiled_model
@@ -167,6 +176,30 @@ anomaly_paths: list[Path] = []
 anomaly_bank = None           # np.ndarray (M, embed_dim), L2-normalized rows
 MAX_ANOMALIES = 128
 anomaly_lock = threading.Lock()
+
+# Per-anomaly metadata that must survive baseline changes (anomalies/index.json):
+# when it was captured and the similarity it scored against the baselines AT
+# CAPTURE TIME. That original score is permanent — later baseline edits do not
+# (and must not) rewrite it.
+anomaly_index: dict[str, dict] = {}
+anomaly_index_lock = threading.RLock()
+
+# RTSP "next 24/48 images" baseline capture plan (persisted so a service
+# restart mid-plan doesn't silently drop it).
+RTSP_SCHEDULE_PATH = BASE_DIR / "rtsp_schedule.json"
+rtsp_schedule_lock = threading.RLock()
+rtsp_schedule_stop = threading.Event()
+rtsp_schedule_state = {
+    "active": False,
+    "stopped": False,
+    "minutes": 60,
+    "total": 0,
+    "captured": 0,
+    "failed": 0,
+    "started_at": None,
+    "next_at": None,
+    "last_error": None,
+}
 
 # Model-loading state (load runs in background so it never wedges the server)
 model_loading = False          # True while a background model load is in progress
@@ -439,9 +472,13 @@ def start_model_load_async():
 def ready_to_autostart() -> str | None:
     """Return a reason the engine can't auto-start, or None if it can.
 
-    Pre-requires: a Frigate URL, a camera, valid zone coords, a cached
-    quantized model, and a baseline image all present."""
-    if not config.get("frigate_url"):
+    Pre-requires: a source URL for the configured source (Frigate or RTSP), a
+    camera name, valid zone coords, a cached quantized model, and a baseline
+    image all present."""
+    if is_rtsp_source():
+        if not config.get("rtsp_url"):
+            return "no RTSP URL configured"
+    elif not config.get("frigate_url"):
         return "no frigate URL configured"
     if not config.get("camera"):
         return "no camera"
@@ -503,8 +540,112 @@ def get_embedding(image: Image.Image) -> np.ndarray:
     return vec
 
 # ============================================================================
+# CAMERA SOURCES (Frigate API or a direct RTSP camera)
+# ============================================================================
+# Two ways to get a live frame:
+#   frigate -> Frigate's /api/<camera>/latest.jpg (its detect stream)
+#   rtsp    -> one frame grabbed straight off the camera with ffmpeg
+# Everything downstream (zone crop, scale, embedding, alerts) is identical, so
+# a camera works the same whether Frigate is in front of it or not.
+_FFMPEG = shutil.which("ffmpeg")
+_rtsp_grab_lock = threading.Lock()
+
+
+def is_rtsp_source() -> bool:
+    return (config.get("source_type") or "frigate").lower() == "rtsp"
+
+
+def source_label() -> str:
+    return "RTSP camera" if is_rtsp_source() else "Frigate"
+
+
+def _redact_url(url: str) -> str:
+    """Hide credentials (rtsp://user:pass@host/... -> rtsp://***@host/...) so
+    they never land in the log file."""
+    if not url:
+        return ""
+    return re.sub(r"(://)[^/@\s]+@", r"\1***@", url)
+
+
+def grab_rtsp_frame(rtsp_url: str, timeout: float = 25.0) -> Image.Image | None:
+    """Grab one full-resolution frame from an RTSP stream (via ffmpeg).
+
+    A fresh connection is opened per grab: cheap at this tool's cadence
+    (>= 3s, usually 60s+), and it avoids running out of the camera's session
+    slots or holding a decode pipeline open forever. ffmpeg is required (it is
+    in Debian/Ubuntu's default repos) — no Python RTSP dependency is added.
+    """
+    url = (rtsp_url or "").strip()
+    if not url:
+        log.error("RTSP grab skipped: no RTSP URL configured")
+        return None
+    if not _FFMPEG:
+        log.error("RTSP grab failed: ffmpeg not found on PATH (apt install ffmpeg)")
+        return None
+
+    cmd = [_FFMPEG, "-hide_banner", "-loglevel", "error"]
+    if url.lower().startswith(("rtsp://", "rtsps://")):
+        # TCP transport survives packet loss far better than UDP on a LAN/WiFi.
+        cmd += ["-rtsp_transport", "tcp"]
+    cmd += [
+        "-i", url,
+        "-frames:v", "1",
+        "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "2",
+        "pipe:1",
+    ]
+
+    # One grab at a time: two concurrent ffmpeg runs against the same camera
+    # can push it over its session limit.
+    try:
+        with _rtsp_grab_lock:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.error("RTSP grab timed out after %.0fs (%s)", timeout, _redact_url(url))
+        return None
+    except Exception as e:
+        log.error("RTSP grab failed for %s: %s", _redact_url(url), e)
+        return None
+
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        log.error("RTSP grab failed for %s (exit %s): %s",
+                  _redact_url(url), proc.returncode, err[-400:] or "no output")
+        return None
+
+    try:
+        return Image.open(BytesIO(proc.stdout)).convert("RGB")
+    except Exception as e:
+        log.error("RTSP grab produced an unreadable frame from %s: %s",
+                  _redact_url(url), e)
+        return None
+
+
+# ============================================================================
 # FRIGATE API HELPERS
 # ============================================================================
+def fetch_frigate_latest() -> Image.Image | None:
+    """Pull the full frame (no zone crop) of the configured camera from Frigate."""
+    url = f"{config['frigate_url']}/api/{config['camera']}/latest.jpg"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        return Image.open(BytesIO(resp.content)).convert("RGB")
+    except Exception as e:
+        log.error("Failed to fetch snapshot: %s", e)
+        return None
+
+
+def fetch_live_frame() -> Image.Image | None:
+    """Full, uncropped live frame from whichever source is configured.
+
+    Used by the zone editor (you draw on the whole frame) and as the raw input
+    for every detection/baseline capture.
+    """
+    if is_rtsp_source():
+        return grab_rtsp_frame(config.get("rtsp_url", ""))
+    return fetch_frigate_latest()
+
+
 def fetch_frigate_snapshot() -> Image.Image | None:
     """Pull latest.jpg from Frigate and crop the active camera's zone.
 
@@ -514,16 +655,22 @@ def fetch_frigate_snapshot() -> Image.Image | None:
     has no zone yet, the returned image is the full frame — callers that SAVE
     (baseline capture) must refuse, not store that.
     """
-    url = f"{config['frigate_url']}/api/{config['camera']}/latest.jpg"
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        img = Image.open(BytesIO(resp.content)).convert("RGB")
-    except Exception as e:
-        log.error("Failed to fetch snapshot: %s", e)
+    img = fetch_frigate_latest()
+    if img is None:
         return None
-
     return _apply_scale(_crop_zone_to(img))
+
+
+def fetch_snapshot() -> Image.Image | None:
+    """The live frame the model actually sees: zone-cropped + crop-scaled.
+
+    Same pipeline for both sources — only the raw frame fetch differs.
+    """
+    img = fetch_live_frame()
+    if img is None:
+        return None
+    return _apply_scale(_crop_zone_to(img))
+
 
 def fetch_frigate_cameras(frigate_url: str) -> list[str]:
     """Get list of camera names from Frigate config API."""
@@ -623,9 +770,9 @@ def capture_baseline_image() -> str | None:
                 "(red box) first — every camera needs its own zone.")
     if compiled_model is None:
         load_model()
-    img = fetch_frigate_snapshot()
+    img = fetch_snapshot()
     if img is None:
-        return "Failed to fetch snapshot from Frigate"
+        return f"Failed to fetch snapshot from {source_label()}"
     if add_baseline_image(img) is None:
         return "Baseline bank full"
     return None
@@ -700,9 +847,14 @@ def fetch_recording_atn(frame_time: float) -> Image.Image | None:
 
 
 def bulk_sample_baselines(spacing_minutes: int) -> dict:
-    """Sample every spacing_minutes for the past 24h, adding each as a baseline.
+    """Frigate only: sample every spacing_minutes for the PAST 24h.
+
     60 min -> 24 images, 30 min -> 48 images. Uses whatever recordings exist;
     never fails the whole run; checks room first."""
+    if is_rtsp_source():
+        return {"ok": False, "error":
+                "Historical 24/48 sampling reads Frigate recordings. With an RTSP "
+                "source use \"Next 24/48 images\" instead — it captures going forward."}
     if not config.get("camera"):
         return {"ok": False, "error": "No camera configured"}
     if not _active_zone():
@@ -737,10 +889,321 @@ def bulk_sample_baselines(spacing_minutes: int) -> dict:
 
 
 # ============================================================================
+# RTSP "NEXT 24/48 IMAGES" (stoppable forward-looking baseline capture)
+# ============================================================================
+# Frigate can hand back the PAST 24h from its recordings. A direct RTSP camera
+# has no history, so the equivalent is to capture going forward: one frame now,
+# then one every 30/60 minutes until 48/24 images land. The plan runs in a
+# background thread, is stoppable at any time, and its progress is persisted so
+# a service restart resumes it instead of silently dropping it.
+def _persist_rtsp_schedule():
+    with rtsp_schedule_lock:
+        snapshot = dict(rtsp_schedule_state)
+    try:
+        tmp = RTSP_SCHEDULE_PATH.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(snapshot, f, indent=2)
+        tmp.replace(RTSP_SCHEDULE_PATH)
+    except Exception as e:
+        log.warning("Could not persist RTSP capture schedule: %s", e)
+
+
+def _load_rtsp_schedule():
+    global rtsp_schedule_state
+    if not RTSP_SCHEDULE_PATH.exists():
+        return
+    try:
+        with open(RTSP_SCHEDULE_PATH) as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            with rtsp_schedule_lock:
+                for key in rtsp_schedule_state:
+                    if key in saved:
+                        rtsp_schedule_state[key] = saved[key]
+    except Exception as e:
+        log.warning("Could not read RTSP capture schedule: %s", e)
+
+
+def rtsp_schedule_status() -> dict:
+    with rtsp_schedule_lock:
+        st = dict(rtsp_schedule_state)
+    st["remaining"] = max(
+        0, int(st.get("total") or 0) - int(st.get("captured") or 0)
+        - int(st.get("failed") or 0)
+    )
+    return st
+
+
+def start_rtsp_schedule(minutes: int) -> dict:
+    """Start capturing the NEXT 24 (hourly) or 48 (every 30 min) images."""
+    if not is_rtsp_source():
+        return {"ok": False, "error":
+                "Select the RTSP source first — forward capture reads the camera "
+                "directly (Frigate sources use \"Previous 24/48\" instead)."}
+    if not config.get("rtsp_url"):
+        return {"ok": False, "error": "No RTSP URL configured"}
+    if not config.get("camera"):
+        return {"ok": False, "error": "No camera name configured"}
+    if not _active_zone():
+        return {"ok": False, "error":
+                "No zone set for this camera. Draw the zone on the snapshot "
+                "(red box) first — every camera needs its own zone."}
+    if minutes not in (30, 60):
+        return {"ok": False, "error": "minutes must be 30 or 60"}
+
+    total = int((24 * 60) / minutes)      # 60 min -> 24 images, 30 min -> 48
+    room = MAX_BASELINES - len(_baseline_files())
+    if room < total:
+        return {"ok": False, "error":
+                f"No room in baseline store: need {total}, only {room} free. "
+                "Delete some baselines first."}
+
+    with rtsp_schedule_lock:
+        if rtsp_schedule_state.get("active"):
+            return {"ok": False, "error":
+                    "A capture plan is already running. Stop it first."}
+        rtsp_schedule_state.update({
+            "active": True,
+            "stopped": False,
+            "minutes": int(minutes),
+            "total": total,
+            "captured": 0,
+            "failed": 0,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "next_at": datetime.now().isoformat(timespec="seconds"),  # first grab now
+            "last_error": None,
+        })
+
+    rtsp_schedule_stop.clear()
+    _persist_rtsp_schedule()
+    threading.Thread(target=_rtsp_schedule_loop,
+                     name="rtsp-baseline-schedule", daemon=True).start()
+    log.info("RTSP baseline plan started: %d images every %d min", total, minutes)
+    return {
+        "ok": True,
+        "total": total,
+        "minutes": int(minutes),
+        "message": (f"Capturing {total} images, one every {minutes} min "
+                    f"(~{(total - 1) * minutes / 60:.0f}h total)."),
+    }
+
+
+def stop_rtsp_schedule() -> dict:
+    """Cancel an in-flight capture plan (frames already saved stay saved)."""
+    rtsp_schedule_stop.set()
+    with rtsp_schedule_lock:
+        was_active = bool(rtsp_schedule_state.get("active"))
+        rtsp_schedule_state["active"] = False
+        rtsp_schedule_state["stopped"] = True
+        rtsp_schedule_state["next_at"] = None
+        captured = int(rtsp_schedule_state.get("captured") or 0)
+        total = int(rtsp_schedule_state.get("total") or 0)
+    _persist_rtsp_schedule()
+    if was_active:
+        log.info("RTSP baseline plan stopped after %d/%d images", captured, total)
+    return {"ok": True, "stopped": was_active, "captured": captured, "total": total}
+
+
+def _wait_for_slot(due_ts: float) -> bool:
+    """Sleep until due_ts. Returns False if a stop was requested meanwhile."""
+    while True:
+        if rtsp_schedule_stop.is_set():
+            return False
+        delay = due_ts - time.time()
+        if delay <= 0:
+            return True
+        rtsp_schedule_stop.wait(min(1.0, delay))
+
+
+def _rtsp_schedule_loop():
+    """Background worker: grab one frame per interval until done or cancelled."""
+    while True:
+        if rtsp_schedule_stop.is_set():
+            break
+        with rtsp_schedule_lock:
+            st = dict(rtsp_schedule_state)
+        if not st.get("active"):
+            break
+        captured = int(st.get("captured") or 0)
+        failed = int(st.get("failed") or 0)
+        total = int(st.get("total") or 0)
+        if captured + failed >= total:
+            break
+
+        # Wait for this slot (the first one is due immediately).
+        due = None
+        if st.get("next_at"):
+            try:
+                due = datetime.fromisoformat(st["next_at"]).timestamp()
+            except (TypeError, ValueError):
+                due = time.time()
+        if due is not None and not _wait_for_slot(due):
+            break
+
+        t0 = time.perf_counter()
+        img = fetch_snapshot()
+        grabbed_ms = (time.perf_counter() - t0) * 1000.0
+        saved = False
+        err = None
+        if img is None:
+            err = f"Frame capture failed from {source_label()}"
+        elif add_baseline_image(img) is None:
+            err = "Baseline store full"
+        else:
+            saved = True
+
+        with rtsp_schedule_lock:
+            if saved:
+                rtsp_schedule_state["captured"] = captured + 1
+            else:
+                rtsp_schedule_state["failed"] = failed + 1
+                rtsp_schedule_state["last_error"] = err
+            done = (int(rtsp_schedule_state["captured"])
+                    + int(rtsp_schedule_state["failed"]))
+            if done >= total:
+                rtsp_schedule_state["next_at"] = None
+            else:
+                spacing = int(rtsp_schedule_state.get("minutes") or 60) * 60
+                rtsp_schedule_state["next_at"] = datetime.fromtimestamp(
+                    time.time() + spacing).isoformat(timespec="seconds")
+        _persist_rtsp_schedule()
+        log.info("RTSP baseline plan: %s (%d/%d done, %.0fms)",
+                 "captured" if saved else f"FAILED - {err}", done, total, grabbed_ms)
+
+    with rtsp_schedule_lock:
+        rtsp_schedule_state["active"] = False
+        rtsp_schedule_state["next_at"] = None
+    _persist_rtsp_schedule()
+    log.info("RTSP baseline plan finished")
+
+
+def resume_rtsp_schedule():
+    """Pick an unfinished capture plan back up after a service restart."""
+    _load_rtsp_schedule()
+    with rtsp_schedule_lock:
+        active = bool(rtsp_schedule_state.get("active"))
+        total = int(rtsp_schedule_state.get("total") or 0)
+        done = (int(rtsp_schedule_state.get("captured") or 0)
+                + int(rtsp_schedule_state.get("failed") or 0))
+    if not active or done >= total:
+        return
+    rtsp_schedule_stop.clear()
+    threading.Thread(target=_rtsp_schedule_loop,
+                     name="rtsp-baseline-schedule", daemon=True).start()
+    log.info("Resumed RTSP baseline plan (%d/%d done)", done, total)
+
+
+# ============================================================================
 # SAVED ANOMALIES (recent MAX persist, deduped)
 # ============================================================================
 def _anomaly_files() -> list[Path]:
     return sorted(ANOMALIES_DIR.glob("anomaly_*.jpg"))
+
+
+# ---------------------------------------------------------------------------
+# Anomaly metadata sidecar (anomalies/index.json)
+# ---------------------------------------------------------------------------
+# A saved anomaly's ORIGINAL similarity is the score it got against the baseline
+# library at the moment it was captured. Baselines can be added/removed/promoted
+# later, so that number can never be recomputed — it is recorded once, forever.
+# The capture timestamp lands in the same record.
+def _anomaly_index_path() -> Path:
+    # Resolved per call (not a module constant) so tests can point ANOMALIES_DIR
+    # at a temp dir and stay there.
+    return ANOMALIES_DIR / "index.json"
+
+
+def _read_anomaly_index() -> dict:
+    path = _anomaly_index_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception as e:
+        log.warning("Could not read %s: %s", path, e)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_anomaly_index(index: dict):
+    path = _anomaly_index_path()
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+        tmp.replace(path)
+    except Exception as e:
+        log.warning("Could not write %s: %s", path, e)
+
+
+def load_anomaly_index() -> dict:
+    """Current {filename: metadata} map, reconciled with what's on disk.
+
+    Entries for deleted images are dropped. Images that predate the index (or
+    were copied in by hand) get their timestamp backfilled from the file mtime
+    and keep original_sim = None — the score they were captured with is gone and
+    inventing one would be worse than showing "unknown".
+    """
+    global anomaly_index
+    index = _read_anomaly_index()
+    files = _anomaly_files()
+    names = {p.name for p in files}
+    changed = False
+
+    for name in list(index.keys()):
+        if name not in names:
+            index.pop(name)
+            changed = True
+
+    for p in files:
+        entry = index.get(p.name)
+        if not isinstance(entry, dict):
+            entry = {}
+            changed = True
+        if not entry.get("created_at"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = time.time()
+            entry["created_at"] = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+            changed = True
+        if "original_sim" not in entry:
+            entry["original_sim"] = None
+            changed = True
+        index[p.name] = entry
+
+    with anomaly_index_lock:
+        anomaly_index = index
+    if changed:
+        _write_anomaly_index(index)
+    return index
+
+
+def record_anomaly_meta(name: str, similarity=None, threshold=None):
+    """Stamp a freshly saved anomaly with its permanent metadata."""
+    global anomaly_index
+    with anomaly_index_lock:
+        # Re-read so a concurrent trim/remove can't be resurrected by this write.
+        index = _read_anomaly_index()
+        index[name] = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "original_sim": None if similarity is None else round(float(similarity), 4),
+            "threshold": None if threshold is None else round(float(threshold), 4),
+            "camera": config.get("camera") or "",
+        }
+        _write_anomaly_index(index)
+        anomaly_index = index
+
+
+def forget_anomaly_meta(name: str):
+    """Drop a trimmed/removed anomaly's metadata."""
+    global anomaly_index
+    with anomaly_index_lock:
+        index = _read_anomaly_index()
+        if index.pop(name, None) is not None:
+            _write_anomaly_index(index)
+        anomaly_index = index
 
 
 def load_anomalies():
@@ -778,7 +1241,8 @@ def _cluster_size_around(bank: np.ndarray, idx: int, threshold: float) -> int:
     return len(seen)
 
 
-def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray) -> bool:
+def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray,
+                       similarity=None, threshold=None) -> bool:
     """Persist a new anomaly unless the saved store already covers it.
 
     Two rules, both configurable:
@@ -788,6 +1252,9 @@ def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray) -> bool:
         many samples (handy when a frame from that event might become a
         baseline later). 0 or null -> 1, so 1 = one sample per unique anomaly
         (the default); raising it keeps samples per event instead of a flood.
+    `similarity` is the score this frame got against the baselines right now; it
+    is stamped into the anomaly's metadata permanently (the two-argument form is
+    kept for callers/tests that don't have a score handy).
     Trims to the newest MAX_ANOMALIES.
     Returns True if saved, False if it was skipped as a duplicate/over-quota."""
     with anomaly_lock:
@@ -810,7 +1277,9 @@ def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray) -> bool:
             if m:
                 nums.append(int(m.group(1)))
         nid = (max(nums, default=0) + 1)
-        image.save(ANOMALIES_DIR / f"anomaly_{nid:03d}.jpg")
+        name = f"anomaly_{nid:03d}.jpg"
+        image.save(ANOMALIES_DIR / name)
+        record_anomaly_meta(name, similarity, threshold)
         load_anomalies()
 
         max_anom = int(config.get("max_anomalies", MAX_ANOMALIES) or MAX_ANOMALIES)
@@ -820,27 +1289,43 @@ def maybe_save_anomaly(image: Image.Image, embedding: np.ndarray) -> bool:
                 oldest.unlink()
             except OSError:
                 break
+            forget_anomaly_meta(oldest.name)
         load_anomalies()
         return True
 
 
 def anomaly_metrics() -> list[dict]:
-    """Per-anomaly nearest-neighbor similarity for the dashboard."""
+    """Per-anomaly dashboard data.
+
+    Two similarity numbers, deliberately kept separate:
+      - store_sim / confidence: how close this anomaly is to the nearest OTHER
+        saved anomaly (dedupe/store geometry; recomputed live).
+      - original_sim: the score it got against the baseline library when it was
+        captured. Permanent — baseline edits never rewrite it.
+    Plus the capture timestamp.
+    """
     if compiled_model is not None and (anomaly_bank is None or
                                        len(anomaly_bank) != len(_anomaly_files())):
         load_anomalies()
     files = _anomaly_files()
+    index = load_anomaly_index()
     n = len(anomaly_bank) if anomaly_bank is not None else 0
     items = []
     for idx, p in enumerate(files, start=1):
         sim = 0.0
         if anomaly_bank is not None and n > 1:
             sim = float(np.max(np.delete(np.dot(anomaly_bank[idx - 1], anomaly_bank.T), idx - 1)))
+        meta = index.get(p.name) or {}
         items.append({
             "index": idx,
             "name": p.name,
             "image_url": f"/api/anomalies/image/{idx}",
-            "confidence": sim * 100.0,
+            "confidence": sim * 100.0,          # similarity to other stored anomalies
+            "store_sim": sim,
+            "original_sim": meta.get("original_sim"),
+            "threshold_at_capture": meta.get("threshold"),
+            "created_at": meta.get("created_at"),
+            "camera": meta.get("camera") or "",
         })
     return items
 
@@ -854,6 +1339,7 @@ def remove_anomaly_by_index(index: int) -> bool:
     except OSError as e:
         log.error("Failed to remove anomaly %s: %s", files[index - 1], e)
         return False
+    forget_anomaly_meta(files[index - 1].name)
     load_anomalies()
     return True
 
@@ -963,18 +1449,39 @@ def setup_mqtt():
         log.error("MQTT connection failed: %s", e)
         mqtt_client = None
 
-def publish_alert(payload: dict):
-    """Publish alert to MQTT topic."""
-    if mqtt_client and config.get("mqtt_topic"):
-        try:
-            mqtt_client.publish(
-                config["mqtt_topic"],
-                json.dumps(payload),
-                qos=1,
-            )
-            log.info("Alert published to %s", config["mqtt_topic"])
-        except Exception as e:
-            log.error("MQTT publish failed: %s", e)
+def publish_alert(payload: dict) -> bool:
+    """Publish an alert to MQTT topic, honouring the alert cooldown.
+
+    mqtt_alert_cooldown (seconds, default 60; 0 = off) is the minimum gap between
+    two publishes: the first anomaly alerts, everything inside the window is
+    dropped. Escalation/re-notification is expected to live in the consumer
+    (Home Assistant et al.), so this only stops the firehose.
+    Returns True if the payload was actually published.
+    """
+    global _last_alert_at
+    if not (mqtt_client and config.get("mqtt_topic")):
+        return False
+
+    cooldown = float(config.get("mqtt_alert_cooldown", 60) or 0)
+    with alert_lock:
+        now = time.time()
+        if cooldown > 0 and _last_alert_at and (now - _last_alert_at) < cooldown:
+            log.info("Alert suppressed — %.0fs of %.0fs cooldown remaining",
+                     cooldown - (now - _last_alert_at), cooldown)
+            return False
+        _last_alert_at = now
+
+    try:
+        mqtt_client.publish(
+            config["mqtt_topic"],
+            json.dumps(payload),
+            qos=1,
+        )
+        log.info("Alert published to %s", config["mqtt_topic"])
+        return True
+    except Exception as e:
+        log.error("MQTT publish failed: %s", e)
+        return False
 
 # ============================================================================
 # DASHBOARD HELPERS
@@ -1059,7 +1566,7 @@ def detection_loop():
             # ---- FETCH & PROCESS ----
             t_cycle = time.perf_counter()
             t0 = time.perf_counter()
-            img = fetch_frigate_snapshot()
+            img = fetch_snapshot()
             fetch_ms = (time.perf_counter() - t0) * 1000.0
             if img is None:
                 continue
@@ -1085,7 +1592,8 @@ def detection_loop():
                     perf_stats["lowest_sim"] = float(similarity)
             if is_anomaly:
                 try:
-                    maybe_save_anomaly(img, embedding)
+                    maybe_save_anomaly(img, embedding, similarity,
+                                       config.get("threshold", 0.89))
                 except Exception as e:
                     log.exception("Failed to save anomaly: %s", e)
 
@@ -1209,7 +1717,23 @@ def post_config():
     old_camera = config.get("camera")
     incoming = request.json or {}
     config.update(incoming)
+
+    # Normalise the source selector; anything unknown falls back to Frigate.
+    src = str(config.get("source_type") or "frigate").lower()
+    config["source_type"] = src if src in ("frigate", "rtsp") else "frigate"
+    if isinstance(config.get("rtsp_url"), str):
+        config["rtsp_url"] = config["rtsp_url"].strip()
+
     cam = config.get("camera") or ""
+    if not cam:
+        # Zones/baselines are keyed by camera name; without one there is nothing
+        # to key them to. Save the rest of the settings and say so.
+        log.warning("Config saved without a camera name — zone not stored")
+        reset_lowest_score()
+        save_config()
+        return jsonify({"status": "Config saved",
+                        "warning": "No camera name — detection zone not stored"})
+
     zones = config.setdefault("zones", {})
     z = incoming.get("zone") or {}
     zref = incoming.get("zone_ref")
@@ -1340,7 +1864,9 @@ def api_baseline_list():
         }
         for idx, p in enumerate(files, start=1)
     ]
-    return jsonify({"baselines": items, "count": len(items), "max": MAX_BASELINES})
+    return jsonify({"baselines": items, "count": len(items), "max": MAX_BASELINES,
+                    "source": "rtsp" if is_rtsp_source() else "frigate",
+                    "rtsp_schedule": rtsp_schedule_status()})
 
 @app.route("/api/baseline/image/<int:index>")
 def api_baseline_image(index: int):
@@ -1386,7 +1912,7 @@ def api_remove_baseline(index: int):
 
 @app.route("/api/baseline/bulk", methods=["POST"])
 def api_bulk_sample():
-    """One-touch 24h baseline set: 24 (hourly) or 48 (every 30 min) samples."""
+    """Frigate only: previous 24h baseline set, 24 (hourly) or 48 (30 min)."""
     data = request.get_json(silent=True) or {}
     minutes = int(data.get("minutes", 60))
     if minutes not in (30, 60):
@@ -1400,6 +1926,52 @@ def api_bulk_sample():
     except Exception as e:
         log.exception("Bulk sample failed")
         return jsonify({"error": str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# RTSP "next 24/48 images" capture plan
+# ---------------------------------------------------------------------------
+@app.route("/api/baseline/rtsp/status")
+def api_rtsp_schedule_status():
+    return jsonify(rtsp_schedule_status())
+
+@app.route("/api/baseline/rtsp/start", methods=["POST"])
+def api_rtsp_schedule_start():
+    """Start a forward-looking capture: one frame every 30/60 min for 24h."""
+    data = request.get_json(silent=True) or {}
+    try:
+        minutes = int(data.get("minutes", 60))
+    except (TypeError, ValueError):
+        return jsonify({"error": "minutes must be 30 or 60"}), 400
+    if minutes not in (30, 60):
+        return jsonify({"error": "minutes must be 30 or 60"}), 400
+    try:
+        report = start_rtsp_schedule(minutes)
+    except Exception as e:
+        log.exception("RTSP capture plan failed to start")
+        return jsonify({"error": str(e)}), 500
+    return jsonify(report), (200 if report.get("ok") else 409)
+
+@app.route("/api/baseline/rtsp/stop", methods=["POST"])
+def api_rtsp_schedule_stop():
+    return jsonify(stop_rtsp_schedule())
+
+@app.route("/api/rtsp/test", methods=["POST"])
+def api_rtsp_test():
+    """Grab one frame from an RTSP URL to prove the connection works."""
+    data = request.get_json(silent=True) or {}
+    url = (data.get("rtsp_url") or config.get("rtsp_url") or "").strip()
+    if not url:
+        return jsonify({"error": "rtsp_url required"}), 400
+    t0 = time.perf_counter()
+    img = grab_rtsp_frame(url)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    if img is None:
+        return jsonify({"error":
+                        f"Could not read a frame from {_redact_url(url)}. Check the "
+                        "URL/credentials, that the camera is reachable, and that "
+                        "ffmpeg is installed on this host."}), 502
+    return jsonify({"status": "ok", "width": img.width, "height": img.height,
+                    "latency_ms": round(elapsed_ms, 1)})
 
 # ---------------------------------------------------------------------------
 # Saved anomalies
@@ -1485,6 +2057,13 @@ def api_start_engine():
     if not config.get("camera"):
         return jsonify({"running": False, "error": "No camera configured"}), 400
 
+    # The configured source must actually be reachable-by-config; otherwise the
+    # loop would just log fetch failures forever.
+    if is_rtsp_source() and not config.get("rtsp_url"):
+        return jsonify({"running": False, "error": "No RTSP URL configured"}), 400
+    if not is_rtsp_source() and not config.get("frigate_url"):
+        return jsonify({"running": False, "error": "No Frigate URL configured"}), 400
+
     # Reload the model if the requested model_size changed since it was last
     # compiled in memory (small/half/full all need their own IR).
     if compiled_model is None or loaded_model_size != config.get("model_size", "half"):
@@ -1520,7 +2099,29 @@ def api_stop_engine():
 
 @app.route("/api/snapshot")
 def proxy_snapshot():
-    """Proxy Frigate snapshot endpoint for the web UI."""
+    """Serve the live FULL frame for the zone editor (no crop, no scale).
+
+    source=frigate (default) -> Frigate's /api/<camera>/latest.jpg
+    source=rtsp              -> one frame grabbed straight off the camera
+
+    The browser only ever sees a JPEG: RTSP credentials stay in the server's
+    config (the URL sent back here is redacted in any log/error).
+    """
+    source = (request.args.get("source") or "frigate").strip().lower()
+
+    if source == "rtsp":
+        rtsp_url = (request.args.get("rtsp_url") or config.get("rtsp_url") or "").strip()
+        if not rtsp_url:
+            return jsonify({"error": "Missing RTSP URL"}), 400
+        img = grab_rtsp_frame(rtsp_url)
+        if img is None:
+            return jsonify({"error":
+                            f"Could not read a frame from {_redact_url(rtsp_url)}"}), 502
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return Response(buf.getvalue(), mimetype='image/jpeg',
+                        headers={'Cache-Control': 'no-cache'})
+
     # .strip() removes hidden spaces/newlines
     frigate_url = request.args.get("frigate_url", "").strip().rstrip('/')
     camera_name = request.args.get("camera_name", "").strip()
@@ -1594,5 +2195,7 @@ if __name__ == "__main__":
     # threaded=True: serve request concurrently so a slow outbound call
     # (snapshot proxy / camera fetch / model load) never wedges the server.
     log.info("Starting Frigate Anomaly Detector PWA on http://0.0.0.0:%d", args.port)
+    # Pick up an RTSP capture plan that was running when the service stopped.
+    resume_rtsp_schedule()
     maybe_autostart()
     app.run(host="0.0.0.0", port=args.port, debug=False, threaded=True)

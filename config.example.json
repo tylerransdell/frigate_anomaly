@@ -1,5 +1,7 @@
 {
+  "source_type": "frigate",
   "frigate_url": "http://192.168.1.100:5000",
+  "rtsp_url": "",
   "camera": "back",
   "zone": {
     "x": 800,
@@ -34,5 +36,6 @@
   "anomaly_dedupe_max_per_unique": 1,
   "mqtt_server": "",
   "mqtt_port": 1883,
-  "mqtt_topic": "frigate/anomaly/alert"
+  "mqtt_topic": "frigate/anomaly/alert",
+  "mqtt_alert_cooldown": 60
 }
