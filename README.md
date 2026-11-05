@@ -104,7 +104,7 @@ docker compose up -d --build
 
 ## A Photo
 
-![dino.png](dino.png)
+![dino-0.1.0.png](dino-0.1.0.png)
 
 *Live dashboard: every detection keeps its similarity score and timestamp, and any frame can be promoted to a baseline in one click.*
 
