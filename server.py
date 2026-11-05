@@ -1511,6 +1511,43 @@ def add_snippet(image: Image.Image, similarity: float, is_anomaly: bool):
 # ============================================================================
 _last_no_zone_warn = 0.0
 
+# Kick-start: a fresh engine run should not sit silent for a whole sampling
+# interval. Intervals are minutes (or an hour, when a duration filter does the
+# real work), so waiting one out means the dashboard/log stay empty long enough
+# to look broken. The very first sample of a run therefore fires quickly and
+# then the configured cadence takes over. Only applies when the configured
+# interval is comfortably slower than the kick-start, so a near-real-time setup
+# (interval < FIRST_CYCLE_MIN_INTERVAL) keeps exactly its own cadence.
+FIRST_CYCLE_DELAY = 5.0          # seconds to wait before the first sample
+FIRST_CYCLE_MIN_INTERVAL = 20.0  # only kick-start when the interval is this slow
+
+
+def _sample_delay(base_interval: float, duration_active_now: bool,
+                  duration: float, min_samples: int,
+                  first_cycle: bool = False):
+    """Seconds to wait before the next sample: (delay, is_kickstart).
+
+    During an active duration window the cadence is derived from the window (so
+    enough samples fit), otherwise it is the plain sampling interval. A
+    first_cycle sample is pulled early unless the interval is already fast.
+    """
+    if duration_active_now:
+        # If the normal interval already fits min_samples inside the duration
+        # window, keep it. Otherwise speed up so that min_samples samples fit,
+        # but never faster than 3s.
+        if duration >= min_samples * base_interval:
+            delay = base_interval
+        else:
+            delay = max(3.0, duration / min_samples)
+    else:
+        delay = base_interval
+
+    if first_cycle and not duration_active_now and base_interval >= FIRST_CYCLE_MIN_INTERVAL:
+        # Never delay longer than the configured interval itself.
+        return min(FIRST_CYCLE_DELAY, delay), True
+
+    return delay, False
+
 def _maybe_warn_no_zone():
     """Rate-limit the 'no zone for this camera' warning (every 30s max)."""
     global _last_no_zone_warn
@@ -1527,11 +1564,15 @@ def detection_loop():
     """
     Main detection loop. Schedules interval sampling, and during an active
     duration filter speeds up sampling so enough samples fit in the window.
+
+    The first sample of each run is pulled after FIRST_CYCLE_DELAY (not a whole
+    interval) so a start/restart shows a result immediately.
     """
     global engine_running, duration_active, duration_start
     global duration_anomaly_count, duration_sample_count
 
     log.info("Detection engine started")
+    first_cycle = True
 
     while engine_running:
         try:
@@ -1540,17 +1581,15 @@ def detection_loop():
             min_samples = config.get("min_samples") or 1        # 0/null -> 1
             base_interval = max(3.0, float(config.get("sampling_interval", 60) or 60))
 
-            if duration_active:
-                duration = float(config.get("duration_filter", 0) or 0)
-                # If the normal interval already fits min_samples inside the
-                # duration window, keep it. Otherwise speed up so that
-                # min_samples samples fit, but never faster than 3s.
-                if duration >= min_samples * base_interval:
-                    delay = base_interval
-                else:
-                    delay = max(3.0, duration / min_samples)
-            else:
-                delay = base_interval
+            delay, kickstart = _sample_delay(
+                base_interval, duration_active,
+                float(config.get("duration_filter", 0) or 0),
+                min_samples, first_cycle,
+            )
+            first_cycle = False
+            if kickstart:
+                log.info("Kick-start: first sample in %.1fs, then every %.0fs",
+                         delay, base_interval)
 
             time.sleep(delay)
 

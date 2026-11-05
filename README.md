@@ -50,6 +50,7 @@ Traditional classifiers break down when data is scarce or the environment introd
   * Half Model (224px): ~35ms per inference.
   * Small Model (112px): ~15ms per inference.
 * Stability Safeguard: Live detection is throttled to a minimum interval (max 1 check per 3 seconds).
+* Kick-start: a freshly started engine takes its first sample ~5s in (whenever your interval is ≥20s), then follows the configured cadence. A 10-minute — or 1-hour — interval no longer leaves the dashboard blank until the first slot comes around.
 * RTSP mode: every frame is a fresh ffmpeg connection, so a grab costs ~0.1–2s depending on the camera's keyframe interval. Sampling every 60s+ is the sane setting; sub-10s intervals will spend most of their time waiting on the camera.
 
 ---
