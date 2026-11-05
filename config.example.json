@@ -25,7 +25,7 @@
   "zone_units": "pixels",
   "model_size": "half",
   "scale": 1,
-  "threshold": 0.89,
+  "threshold": 0.93,
   "similarity_method": "mean_top3",
   "neighbors": 3,
   "sampling_interval": 60,

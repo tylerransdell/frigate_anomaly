@@ -98,7 +98,7 @@ RTSP mode additionally needs `ffmpeg` on the host (`sudo apt install ffmpeg`). F
 5. Capture baselines: individually, from the live dashboard/anomaly store, or in bulk —
    * Frigate: **Previous 24/48** pulls historical snapshots out of Frigate's recordings.
    * RTSP: **Next 24/48** starts a stoppable background plan that captures one frame every hour (24) or 30 minutes (48) from now on. Progress and a Stop button live right under the buttons.
-6. Select your similarity method (Nearest 1 vs. Mean of top 3) and set your Anomaly Threshold.
+6. Select your similarity method (Nearest 1 vs. Mean of top 3) and set your Anomaly Threshold — start around **0.93**; the sampling/duration filters keep transient noise out, so a tighter cutoff won't drown you in alerts.
 7. Review sampling/duration filters, the MQTT alert cooldown, and hit Start Engine.
 
 Detection will start automatically if the detector has the information it needs to detect, allowing the script to be cleanly wrapped as a service.

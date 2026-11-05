@@ -298,9 +298,9 @@
   </div>
 
   <label>Anomaly Threshold
-    <span class="hint">Cosine similarity cutoff. Live frames scoring below this are flagged anomalous. Start around 0.89.</span>
+    <span class="hint">Cosine similarity cutoff. Live frames scoring below this are flagged anomalous. Start around 0.93 — the sampling and duration filters absorb transient noise, so a tight cutoff catches more without alerting on every shadow.</span>
   </label>
-  <input id="threshold" type="number" step="0.01" min="0.5" max="0.99" value="0.89">
+  <input id="threshold" type="number" step="0.01" min="0.5" max="0.99" value="0.93">
 </div>
 
 <!-- SAMPLING & DURATION -->
@@ -1395,7 +1395,7 @@ pollDashboard();
         }
         camSelect.value = data.camera;
       }
-      document.getElementById('threshold').value = data.threshold || 0.89;
+      document.getElementById('threshold').value = data.threshold || 0.93;
       if (data.model_size) {
         const sizeTargets = {
           'small': '[data-val="small"]',

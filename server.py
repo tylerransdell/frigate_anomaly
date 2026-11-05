@@ -122,7 +122,7 @@ DEFAULT_CONFIG = {
     "model_size": "half",          # "small" (112) or "half" (224)
     "scale": 1.0,                  # 0.5, 1.0, 2.0, or 3.0 — or "free" (user-drawn, resized to model input)
     "zone_shape": "rect",          # "rect" (numeric crop scale) or "free" (user-drawn, resized to model input)
-    "threshold": 0.89,
+    "threshold": 0.93,
     "similarity_method": "mean_top3",   # "nearest" (1 closest baseline) or "mean_top3" (mean of top 3)
     "neighbors": 3,                # top-k closest baselines averaged when using "mean_top3"
     "sampling_interval": 60,       # seconds (min 3; how often to sample)
@@ -802,7 +802,7 @@ def _baseline_metrics() -> dict[str, dict]:
     return metrics
 
 def evaluate_against_baselines(embedding: np.ndarray, bank: np.ndarray,
-                               threshold: float = 0.89, k: int = 3):
+                               threshold: float = 0.93, k: int = 3):
     """Score a test embedding against the baseline bank.
 
     Similarity = mean cosine of the k closest baselines (or all of them if
@@ -1620,7 +1620,7 @@ def detection_loop():
             t0 = time.perf_counter()
             similarity, confidence, is_anomaly = evaluate_against_baselines(
                 embedding, baseline_bank,
-                threshold=config.get("threshold", 0.89),
+                threshold=config.get("threshold", 0.93),
                 k=get_comparison_k(),
             )
             total_ms = (time.perf_counter() - t_cycle) * 1000.0
@@ -1632,7 +1632,7 @@ def detection_loop():
             if is_anomaly:
                 try:
                     maybe_save_anomaly(img, embedding, similarity,
-                                       config.get("threshold", 0.89))
+                                       config.get("threshold", 0.93))
                 except Exception as e:
                     log.exception("Failed to save anomaly: %s", e)
 
@@ -1657,7 +1657,7 @@ def detection_loop():
                 "DETECT cam=%s sim=%.4f conf=%.1f%% status=%s thresh=%.2f fetch=%.1fms infer=%.1fms total=%.1fms",
                 config.get("camera"), similarity, confidence,
                 "ANOMALY" if is_anomaly else "NORMAL",
-                config.get("threshold", 0.89),
+                config.get("threshold", 0.93),
                 fetch_ms, infer_ms, total_ms,
             )
 
