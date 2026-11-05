@@ -32,8 +32,8 @@ logs/
 # Debug / test artifacts (may contain your camera feed & IPs)
 front_test.jpg
 back_test.jpg
-test_proxy.py
-test_bulk_sampling.py
+# Local scratch tests — never part of the published repo
+test_*.py
 *.jpg
 *.test
 notes*
